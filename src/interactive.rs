@@ -1770,10 +1770,9 @@ impl PiApp {
         self.run_memory_pressure_actions();
 
         // Handle our custom Pi messages (take ownership to avoid per-token clone).
-        // NOTE: We check with `is()` first, then `downcast().unwrap()` to consume
-        // the message only when we know it will succeed.
-        if msg.is::<PiMsg>() {
-            return self.handle_pi_message(msg.downcast::<PiMsg>().unwrap());
+        if msg.downcast_ref::<PiMsg>().is_some() {
+            let pi_msg = msg.downcast::<PiMsg>().unwrap();
+            return self.handle_pi_message(pi_msg);
         }
 
         if let Some(size) = msg.downcast_ref::<WindowSizeMsg>() {
