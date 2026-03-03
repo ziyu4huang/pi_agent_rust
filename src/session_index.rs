@@ -98,7 +98,7 @@ impl SessionIndex {
                        message_count=excluded.message_count,
                        last_modified_ms=excluded.last_modified_ms,
                        size_bytes=excluded.size_bytes,
-                       name=excluded.name",
+                       name=COALESCE(excluded.name, sessions.name)",
                     &[
                         Value::Text(meta.path),
                         Value::Text(meta.id),
