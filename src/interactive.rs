@@ -160,15 +160,13 @@ impl PiApp {
             None
         };
 
-        // Capture scroll state before update if we aren't following tail.
-        // We want to maintain the distance from the bottom to keep the view stable
-        // if content is appended while the user is scrolled up.
-        let dist_from_bottom = if follow_tail {
+        // When the user has scrolled away (follow_tail == false), preserve
+        // the absolute y_offset so new content appended at the bottom does
+        // not shift the lines the user is reading.
+        let saved_offset = if follow_tail {
             None
         } else {
-            let current_content_height = self.conversation_viewport.total_line_count();
-            let current_y_offset = self.conversation_viewport.y_offset();
-            Some(current_content_height.saturating_sub(current_y_offset))
+            Some(self.conversation_viewport.y_offset())
         };
 
         let content = self.build_conversation_content();
@@ -180,11 +178,10 @@ impl PiApp {
         if follow_tail {
             self.conversation_viewport.goto_bottom();
             self.follow_stream_tail = true;
-        } else if let Some(dist) = dist_from_bottom {
-            // Restore scroll position relative to the new bottom.
-            let new_content_height = trimmed.lines().count();
-            let new_y_offset = new_content_height.saturating_sub(dist);
-            self.conversation_viewport.set_y_offset(new_y_offset);
+        } else if let Some(offset) = saved_offset {
+            // Restore the exact scroll position. set_y_offset() clamps to
+            // max_y_offset internally, so this is safe even if content shrank.
+            self.conversation_viewport.set_y_offset(offset);
         }
 
         if let Some(start) = vp_start {
@@ -806,6 +803,20 @@ impl PiApp {
         if show_input {
             // render_input: "\n  header\n" (2 rows) + input.height() rows.
             chrome += 2 + self.input.height();
+
+            // Autocomplete dropdown chrome when open: top border(1) +
+            // items(visible_count) + description(1) + pagination(1) +
+            // bottom border(1) + help(1).  Budget for the dropdown so
+            // the conversation viewport shrinks to make room.
+            if self.autocomplete.open && !self.autocomplete.items.is_empty() {
+                let visible = self
+                    .autocomplete
+                    .max_visible
+                    .min(self.autocomplete.items.len());
+                // 5 = top border + possible description + possible pagination
+                //     + bottom border + help line
+                chrome += visible + 5;
+            }
         } else if self.show_processing_status_spinner() {
             // Processing spinner: "\n  spinner Processing...\n" = 2 rows.
             chrome += 2;

@@ -1024,10 +1024,18 @@ impl PiApp {
         let mut output = String::new();
 
         let offset = self.autocomplete.scroll_offset();
+        // Constrain visible items to available terminal space.
+        // Dropdown chrome uses ~5 rows (borders, help, pagination, description).
+        let max_dropdown_rows = self.term_height.saturating_sub(
+            // header(4) + min conversation(1) + scroll indicator(1)
+            // + input(2 + height) + footer(2) + dropdown chrome(5)
+            4 + 1 + 1 + 2 + self.input.height() + 2 + 5,
+        );
         let visible_count = self
             .autocomplete
             .max_visible
-            .min(self.autocomplete.items.len());
+            .min(self.autocomplete.items.len())
+            .min(max_dropdown_rows.max(1));
         let end = (offset + visible_count).min(self.autocomplete.items.len());
 
         // Styles

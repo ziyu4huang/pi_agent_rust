@@ -704,22 +704,28 @@ impl PiApp {
             // =========================================================
             AppAction::PageUp => {
                 // Sync viewport content and height so page_up() has correct
-                // line count and page size.
+                // line count and page size.  Save/restore y_offset across
+                // set_content() which can clamp or reset the offset.
+                let saved_offset = self.conversation_viewport.y_offset();
                 let content = self.build_conversation_content();
                 let effective = self.view_effective_conversation_height().max(1);
                 self.conversation_viewport.height = effective;
                 self.conversation_viewport.set_content(content.trim_end());
+                self.conversation_viewport.set_y_offset(saved_offset);
                 self.conversation_viewport.page_up();
                 self.follow_stream_tail = false;
                 None
             }
             AppAction::PageDown => {
                 // Sync viewport content and height so page_down() has correct
-                // line count and page size.
+                // line count and page size.  Save/restore y_offset across
+                // set_content() which can clamp or reset the offset.
+                let saved_offset = self.conversation_viewport.y_offset();
                 let content = self.build_conversation_content();
                 let effective = self.view_effective_conversation_height().max(1);
                 self.conversation_viewport.height = effective;
                 self.conversation_viewport.set_content(content.trim_end());
+                self.conversation_viewport.set_y_offset(saved_offset);
                 self.conversation_viewport.page_down();
                 // Re-enable auto-follow if the user scrolled back to the bottom.
                 if self.is_at_bottom() {
