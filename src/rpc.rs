@@ -3883,7 +3883,6 @@ async fn cycle_model_for_rpc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
     use crate::auth::AuthCredential;
     use crate::model::{
         ContentBlock, ImageContent, TextContent, ThinkingLevel, UserContent, UserMessage,
@@ -3892,6 +3891,7 @@ mod tests {
     use crate::session::Session;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::time::Instant;
 
     // -----------------------------------------------------------------------
     // Helper builders

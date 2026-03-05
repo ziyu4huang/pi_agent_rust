@@ -2924,24 +2924,37 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
 
                 let start = Instant::now();
                 let mut killed = false;
-                let mut stdout_bytes = Vec::new();
-                let mut stderr_bytes = Vec::new();
                 let max_bytes = crate::tools::DEFAULT_MAX_BYTES.saturating_mul(2);
+
+                let mut stdout_chunks = std::collections::VecDeque::new();
+                let mut stderr_chunks = std::collections::VecDeque::new();
+                let mut stdout_bytes_len = 0usize;
+                let mut stderr_bytes_len = 0usize;
+
+                let mut ingest_chunk = |kind: StreamKind, bytes: Vec<u8>| match kind {
+                    StreamKind::Stdout => {
+                        stdout_bytes_len += bytes.len();
+                        stdout_chunks.push_back(bytes);
+                        while stdout_bytes_len > max_bytes && stdout_chunks.len() > 1 {
+                            if let Some(front) = stdout_chunks.pop_front() {
+                                stdout_bytes_len -= front.len();
+                            }
+                        }
+                    }
+                    StreamKind::Stderr => {
+                        stderr_bytes_len += bytes.len();
+                        stderr_chunks.push_back(bytes);
+                        while stderr_bytes_len > max_bytes && stderr_chunks.len() > 1 {
+                            if let Some(front) = stderr_chunks.pop_front() {
+                                stderr_bytes_len -= front.len();
+                            }
+                        }
+                    }
+                };
 
                 let status = loop {
                     while let Ok(chunk) = rx.try_recv() {
-                        match chunk.kind {
-                            StreamKind::Stdout => {
-                                if stdout_bytes.len() < max_bytes {
-                                    stdout_bytes.extend_from_slice(&chunk.bytes);
-                                }
-                            }
-                            StreamKind::Stderr => {
-                                if stderr_bytes.len() < max_bytes {
-                                    stderr_bytes.extend_from_slice(&chunk.bytes);
-                                }
-                            }
-                        }
+                        ingest_chunk(chunk.kind, chunk.bytes);
                     }
 
                     if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
@@ -2963,18 +2976,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 let drain_deadline = Instant::now() + Duration::from_secs(2);
                 loop {
                     match rx.try_recv() {
-                        Ok(chunk) => match chunk.kind {
-                            StreamKind::Stdout => {
-                                if stdout_bytes.len() < max_bytes {
-                                    stdout_bytes.extend_from_slice(&chunk.bytes);
-                                }
-                            }
-                            StreamKind::Stderr => {
-                                if stderr_bytes.len() < max_bytes {
-                                    stderr_bytes.extend_from_slice(&chunk.bytes);
-                                }
-                            }
-                        },
+                        Ok(chunk) => ingest_chunk(chunk.kind, chunk.bytes),
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
                             if Instant::now() >= drain_deadline {
                                 break;
@@ -2986,6 +2988,9 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 }
 
                 drop(rx); // Close the channel so pump threads exit if blocked
+
+                let stdout_bytes: Vec<u8> = stdout_chunks.into_iter().flatten().collect();
+                let stderr_bytes: Vec<u8> = stderr_chunks.into_iter().flatten().collect();
 
                 let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
                 let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
@@ -3797,7 +3802,10 @@ mod tests {
             &self,
             request: ExtensionUiRequest,
         ) -> Result<Option<ExtensionUiResponse>> {
-            self.captured.lock().unwrap().push(request.clone());
+            self.captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.clone());
             Ok(Some(ExtensionUiResponse {
                 id: request.id,
                 value: Some(self.response_value.clone()),
@@ -3824,27 +3832,45 @@ mod tests {
     #[async_trait]
     impl ExtensionSession for TestSession {
         async fn get_state(&self) -> Value {
-            self.state.lock().unwrap().clone()
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         async fn get_messages(&self) -> Vec<SessionMessage> {
-            self.messages.lock().unwrap().clone()
+            self.messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         async fn get_entries(&self) -> Vec<Value> {
-            self.entries.lock().unwrap().clone()
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         async fn get_branch(&self) -> Vec<Value> {
-            self.branch.lock().unwrap().clone()
+            self.branch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         async fn set_name(&self, name: String) -> Result<()> {
             {
-                let mut guard = self.name.lock().unwrap();
+                let mut guard = self
+                    .name
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *guard = Some(name.clone());
             }
-            let mut state = self.state.lock().unwrap();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Value::Object(ref mut map) = *state {
                 map.insert("sessionName".to_string(), Value::String(name));
             }
@@ -3853,7 +3879,10 @@ mod tests {
         }
 
         async fn append_message(&self, message: SessionMessage) -> Result<()> {
-            self.messages.lock().unwrap().push(message);
+            self.messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(message);
             Ok(())
         }
 
@@ -3870,7 +3899,10 @@ mod tests {
         }
 
         async fn set_model(&self, provider: String, model_id: String) -> Result<()> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Value::Object(ref mut map) = *state {
                 map.insert("provider".to_string(), Value::String(provider));
                 map.insert("modelId".to_string(), Value::String(model_id));
@@ -3880,7 +3912,10 @@ mod tests {
         }
 
         async fn get_model(&self) -> (Option<String>, Option<String>) {
-            let state = self.state.lock().unwrap();
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let provider = state
                 .get("provider")
                 .and_then(Value::as_str)
@@ -3894,7 +3929,10 @@ mod tests {
         }
 
         async fn set_thinking_level(&self, level: String) -> Result<()> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Value::Object(ref mut map) = *state {
                 map.insert("thinkingLevel".to_string(), Value::String(level));
             }
@@ -3903,7 +3941,10 @@ mod tests {
         }
 
         async fn get_thinking_level(&self) -> Option<String> {
-            let state = self.state.lock().unwrap();
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let level = state
                 .get("thinkingLevel")
                 .and_then(Value::as_str)
@@ -3913,7 +3954,10 @@ mod tests {
         }
 
         async fn set_label(&self, target_id: String, label: Option<String>) -> Result<()> {
-            self.labels.lock().unwrap().push((target_id, label));
+            self.labels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((target_id, label));
             Ok(())
         }
     }
@@ -4213,7 +4257,10 @@ mod tests {
             assert_eq!(name_value, Value::String("demo".to_string()));
             assert_eq!(name_set, Value::Bool(true));
 
-            let name_value = name.lock().unwrap().clone();
+            let name_value = name
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(name_value.as_deref(), Some("hello"));
         });
     }
@@ -4395,7 +4442,11 @@ mod tests {
             assert_eq!(entry_appended, Value::Bool(true));
 
             {
-                let messages = session.messages.lock().unwrap().clone();
+                let messages = session
+                    .messages
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 assert_eq!(messages.len(), 1);
                 match &messages[0] {
                     SessionMessage::Custom {
@@ -4417,7 +4468,11 @@ mod tests {
 
             {
                 let expected = Some(serde_json::json!({ "ok": true }));
-                let custom_entries = session.custom_entries.lock().unwrap().clone();
+                let custom_entries = session
+                    .custom_entries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 assert_eq!(custom_entries.len(), 1);
                 assert_eq!(custom_entries[0].0, "meta");
                 assert_eq!(custom_entries[0].1, expected);
@@ -5053,7 +5108,10 @@ mod tests {
                 .await
                 .expect("verify result");
 
-            let seen = captured.lock().unwrap().clone();
+            let seen = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(seen.len(), 1);
             assert_eq!(seen[0].method, "confirm");
         });
@@ -5100,7 +5158,10 @@ mod tests {
 
             runtime.tick().await.expect("tick");
 
-            let seen = captured.lock().unwrap().clone();
+            let seen = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(seen.len(), 1);
             assert_eq!(seen[0].method, "setStatus");
             assert_eq!(
@@ -5159,7 +5220,10 @@ mod tests {
 
             runtime.tick().await.expect("tick");
 
-            let seen = captured.lock().unwrap().clone();
+            let seen = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(seen.len(), 1);
             assert_eq!(seen[0].method, "setWidget");
             assert_eq!(
@@ -5332,7 +5396,10 @@ mod tests {
                 .await
                 .expect("verify set_model result");
 
-            let final_state = state.lock().unwrap().clone();
+            let final_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(
                 final_state.get("provider").and_then(Value::as_str),
                 Some("anthropic")
@@ -5630,7 +5697,10 @@ mod tests {
                 .await
                 .expect("verify set_thinking_level");
 
-            let final_state = state.lock().unwrap().clone();
+            let final_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(
                 final_state.get("thinkingLevel").and_then(Value::as_str),
                 Some("high")
@@ -6016,7 +6086,10 @@ mod tests {
                 .await
                 .expect("verify model_id snake_case");
 
-            let final_state = state.lock().unwrap().clone();
+            let final_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(
                 final_state.get("modelId").and_then(Value::as_str),
                 Some("claude-opus-4-20250514")
@@ -6091,7 +6164,10 @@ mod tests {
                 .expect("verify alt keys");
 
             // Last write wins, so "low" should be the final value
-            let final_state = state.lock().unwrap().clone();
+            let final_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(
                 final_state.get("thinkingLevel").and_then(Value::as_str),
                 Some("low")
@@ -6204,7 +6280,9 @@ mod tests {
             }
 
             // Verify set_label was called with correct args
-            let captured = labels.lock().unwrap();
+            let captured = labels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(captured.len(), 1);
             assert_eq!(captured[0].0, "msg-42");
             assert_eq!(captured[0].1.as_deref(), Some("important"));
@@ -6265,7 +6343,9 @@ mod tests {
             }
 
             // Verify set_label was called with None label (removal)
-            let captured = labels.lock().unwrap();
+            let captured = labels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(captured.len(), 1);
             assert_eq!(captured[0].0, "msg-99");
             assert!(captured[0].1.is_none());
@@ -6375,7 +6455,9 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let captured = labels.lock().unwrap();
+            let captured = labels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(captured.len(), 1);
             assert_eq!(captured[0].0, "msg-77");
             assert_eq!(captured[0].1.as_deref(), Some("reviewed"));
@@ -6436,7 +6518,9 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let captured = labels.lock().unwrap();
+            let captured = labels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(captured.len(), 1);
             assert_eq!(captured[0].0, "entry-5");
             assert_eq!(captured[0].1.as_deref(), Some("flagged"));
@@ -7168,7 +7252,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "spinner");
             assert_eq!(reqs[0].payload["text"], "Loading...");
@@ -7222,7 +7309,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "progress");
             assert_eq!(reqs[0].payload["current"], 50);
@@ -7277,7 +7367,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "notification");
             assert_eq!(reqs[0].payload["message"], "Task complete!");
@@ -7384,7 +7477,9 @@ mod tests {
             }
 
             let (len, methods) = {
-                let reqs = captured.lock().unwrap();
+                let reqs = captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let len = reqs.len();
                 let methods = reqs.iter().map(|r| r.method.clone()).collect::<Vec<_>>();
                 drop(reqs);
@@ -7796,7 +7891,9 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let captured = custom_entries.lock().unwrap();
+            let captured = custom_entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(captured.len(), 1);
             assert_eq!(captured[0].0, "audit_log");
             assert!(captured[0].1.is_some());
@@ -8638,7 +8735,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "custom_op");
             assert_eq!(reqs[0].payload["key"], "value");
@@ -8698,7 +8798,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             let payload = &reqs[0].payload;
             assert!(payload["lines"].is_array());
@@ -8819,7 +8922,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "set_status");
             assert_eq!(reqs[0].payload["text"], "");
@@ -8873,7 +8979,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "dismiss");
         });
@@ -8930,7 +9039,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 3);
             let methods: Vec<&str> = reqs.iter().map(|r| r.method.as_str()).collect();
             assert!(methods.contains(&"set_status"));
@@ -8986,7 +9098,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "notification");
             assert_eq!(reqs[0].payload["severity"], "error");
@@ -9047,7 +9162,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "set_widget");
             let lines = reqs[0].payload["lines"].as_array().unwrap();
@@ -9104,7 +9222,10 @@ mod tests {
                 runtime.drain_microtasks().await.expect("microtasks");
             }
 
-            let reqs = captured.lock().unwrap().clone();
+            let reqs = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             assert_eq!(reqs.len(), 1);
             assert_eq!(reqs[0].method, "progress");
             assert_eq!(reqs[0].payload["percent"], 75);
@@ -12414,7 +12535,10 @@ mod tests {
             #[async_trait]
             impl ExtensionSession for DivergentReadSession {
                 async fn get_state(&self) -> Value {
-                    let mut guard = self.counter.lock().expect("counter lock");
+                    let mut guard = self
+                        .counter
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let value = *guard;
                     *guard = guard.saturating_add(1);
                     drop(guard);

@@ -1080,18 +1080,12 @@ impl SessionStoreV2 {
                     }
                     Err(err) => {
                         let at_eof = reader.fill_buf()?.is_empty();
-                        if !at_eof || !missing_newline {
-                            return Err(Error::session(format!(
-                                "failed to parse segment frame while rebuilding index (corruption in segment {}): {}",
-                                seg_path.display(),
-                                err
-                            )));
-                        }
                         tracing::warn!(
                             segment = %seg_path.display(),
                             line_number,
                             error = %err,
                             at_eof,
+                            missing_newline,
                             "SessionStoreV2 dropping corrupted frame during index rebuild; truncating segment and dropping subsequent segments"
                         );
                         // Trim the incomplete tail so subsequent reads and appends remain valid.

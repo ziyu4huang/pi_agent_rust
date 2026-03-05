@@ -370,7 +370,11 @@ impl Response {
                 return Err(Error::api("Request timed out reading body"));
             }
 
-            let sleep_fut = sleep(asupersync_now, timeout.checked_sub(elapsed).unwrap_or_default()).fuse();
+            let sleep_fut = sleep(
+                asupersync_now,
+                timeout.checked_sub(elapsed).unwrap_or_default(),
+            )
+            .fuse();
             let read_fut = read_fut.fuse();
             futures::pin_mut!(sleep_fut, read_fut);
 

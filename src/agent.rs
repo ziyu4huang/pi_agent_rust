@@ -4566,7 +4566,7 @@ impl AgentSession {
                 }
 
                 let stream_options = self.agent.stream_options_mut();
-                stream_options.api_key = resolved_key;
+                stream_options.api_key = resolved_key; // ubs:ignore - not a hardcoded secret
                 stream_options.headers.clone_from(&entry.headers);
             }
             Err(e) => {
