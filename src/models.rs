@@ -417,6 +417,10 @@ pub fn model_autocomplete_candidates() -> &'static [ModelAutocompleteCandidate] 
                 slug: "openai/gpt-5.4".to_string(),
                 description: Some("GPT-5.4".to_string()),
             });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "openai-codex/gpt-5.4".to_string(),
+                description: Some("GPT-5.4 Codex".to_string()),
+            });
             candidates.sort_by_key(|candidate| candidate.slug.to_ascii_lowercase());
             candidates.dedup_by(|a, b| a.slug.eq_ignore_ascii_case(&b.slug));
             candidates
@@ -1085,6 +1089,52 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
     //
     // The legacy catalog can lag behind upstream model IDs; we use a conservative
     // seed here to keep the default selection stable.
+    if !models
+        .iter()
+        .any(|entry| entry.model.provider == "openai-codex" && entry.model.id == "gpt-5.4")
+    {
+        models.push(ModelEntry {
+            model: Model {
+                id: "gpt-5.4".to_string(),
+                name: "GPT-5.4 Codex".to_string(),
+                api: if mode == ModelRegistryLoadMode::Full {
+                    Api::OpenAICodexResponses.to_string()
+                } else {
+                    "openai-codex-responses".to_string()
+                },
+                provider: "openai-codex".to_string(),
+                base_url: if mode == ModelRegistryLoadMode::Full {
+                    "https://chatgpt.com/backend-api".to_string()
+                } else {
+                    String::new()
+                },
+                reasoning: true,
+                input: vec![InputType::Text, InputType::Image],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 272_000,
+                max_tokens: 128_000,
+                headers: HashMap::new(),
+            },
+            api_key: resolve_provider_api_key_cached(
+                auth,
+                "openai-codex",
+                "openai-codex",
+                &mut canonical_api_key_cache,
+                &mut provider_api_key_cache,
+            ),
+            headers: HashMap::new(),
+            auth_header: true,
+            compat: None,
+            oauth_config: None,
+        });
+    }
+
+    // Keep the prior Codex default available until the bundled legacy catalog catches up.
     if !models
         .iter()
         .any(|entry| entry.model.provider == "openai-codex" && entry.model.id == "gpt-5.3-codex")
@@ -1855,10 +1905,15 @@ mod tests {
     }
 
     #[test]
-    fn built_in_models_include_legacy_oauth_provider_entries() {
+    fn built_in_models_include_oauth_provider_entries() {
         let (_dir, auth) = test_auth_storage();
         let models = built_in_models(&auth, ModelRegistryLoadMode::Full);
 
+        assert!(models.iter().any(|m| {
+            m.model.provider == "openai-codex"
+                && m.model.api == "openai-codex-responses"
+                && m.model.id == "gpt-5.4"
+        }));
         assert!(models.iter().any(|m| {
             m.model.provider == "openai-codex"
                 && m.model.api == "openai-codex-responses"
@@ -1899,6 +1954,11 @@ mod tests {
     #[test]
     fn autocomplete_candidates_include_legacy_and_latest_entries() {
         let candidates = model_autocomplete_candidates();
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.slug == "openai-codex/gpt-5.4")
+        );
         assert!(
             candidates
                 .iter()
@@ -2201,6 +2261,18 @@ mod tests {
             .find_by_id("GPT-5.2-CODEX")
             .expect("gpt-5.2-codex should resolve case-insensitively");
         assert_eq!(by_id.model.id, "gpt-5.2-codex");
+    }
+
+    #[test]
+    fn model_registry_finds_latest_openai_codex_seed() {
+        let (_dir, auth) = test_auth_storage();
+        let registry = ModelRegistry::load(&auth, None);
+
+        let by_provider = registry
+            .find("openai-codex", "GPT-5.4")
+            .expect("gpt-5.4 codex should resolve case-insensitively");
+        assert_eq!(by_provider.model.provider, "openai-codex");
+        assert_eq!(by_provider.model.id, "gpt-5.4");
     }
 
     #[test]

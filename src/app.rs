@@ -678,10 +678,12 @@ fn default_model_from_catalog(models: &[ModelEntry]) -> ModelEntry {
 fn default_model_from_candidates(candidates: &[ModelEntry]) -> ModelEntry {
     let defaults = [
         // Prefer Codex (ChatGPT OAuth) when available.
+        ("openai-codex", "gpt-5.4"),
         ("openai-codex", "gpt-5.3-codex"),
         ("openai-codex", "gpt-5.2-codex"),
         ("openai-codex", "gpt-5.1-codex-max"),
         // Fall back to OpenAI API when configured.
+        ("openai", "gpt-5.4"),
         ("openai", "gpt-5.3-codex"),
         ("openai", "gpt-5.2-codex"),
         ("openai", "gpt-5.1-codex"),
@@ -1177,14 +1179,10 @@ mod tests {
         let startup = err
             .downcast_ref::<StartupError>()
             .expect("missing key should map to startup error");
-        match startup {
-            StartupError::MissingApiKey { provider } => {
-                assert_eq!(provider, "openai");
-            }
-            StartupError::NoModelsAvailable { .. } => {
-                panic!();
-            }
-        }
+        assert!(matches!(
+            startup,
+            StartupError::MissingApiKey { provider } if provider == "openai"
+        ));
     }
 
     #[test]
@@ -1200,11 +1198,23 @@ mod tests {
     }
 
     #[test]
-    fn default_model_from_available_matches_default_id_case_insensitively() {
-        let available = vec![test_model_entry("GPT-5.2-CODEX", "openai-codex", true)];
+    fn default_model_from_available_prefers_latest_openai_codex_default() {
+        let available = vec![
+            test_model_entry("gpt-5.3-codex", "openai-codex", true),
+            test_model_entry("gpt-5.4", "openai-codex", true),
+        ];
+
         let selected = default_model_from_available(&available);
         assert_eq!(selected.model.provider, "openai-codex");
-        assert_eq!(selected.model.id, "GPT-5.2-CODEX");
+        assert_eq!(selected.model.id, "gpt-5.4");
+    }
+
+    #[test]
+    fn default_model_from_available_matches_default_id_case_insensitively() {
+        let available = vec![test_model_entry("GPT-5.4", "openai-codex", true)];
+        let selected = default_model_from_available(&available);
+        assert_eq!(selected.model.provider, "openai-codex");
+        assert_eq!(selected.model.id, "GPT-5.4");
     }
 
     #[test]

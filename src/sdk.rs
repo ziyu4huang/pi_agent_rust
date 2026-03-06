@@ -1702,7 +1702,7 @@ mod tests {
         let handle = run_async(create_agent_session(options)).expect("create session");
         let provider = handle.session().agent.provider();
         assert_eq!(provider.name(), "openai-codex");
-        assert_eq!(provider.model_id(), "gpt-5.3-codex");
+        assert_eq!(provider.model_id(), "gpt-5.4");
     }
 
     #[test]

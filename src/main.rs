@@ -3621,7 +3621,7 @@ Code expires in {} seconds.\n",
         cli.model = None;
     }
     if provider.provider == "openai-codex" {
-        cli.model = Some("gpt-5.3-codex".to_string());
+        cli.model = Some("gpt-5.4".to_string());
     }
 
     let saved_label = match provider.kind {
@@ -4488,8 +4488,9 @@ mod tests {
     #[test]
     fn fuzzy_match_model_id_matches_combined_haystack_behavior() {
         let cases = [
+            ("g54", "openai-codex", "gpt-5.4"),
+            ("oc54", "openai-codex", "gpt-5.4"),
             ("g53", "openai-codex", "gpt-5.3-codex"),
-            ("oc53", "openai-codex", "gpt-5.3-codex"),
             ("son46", "anthropic", "claude-sonnet-4-6"),
             ("opn router", "openrouter", "anthropic/claude-3.7-sonnet"),
             ("zzzz", "openai", "gpt-4o"),
