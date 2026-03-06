@@ -64,9 +64,11 @@ impl PiApp {
             return;
         }
 
-        self.model_selector = Some(crate::model_selector::ModelSelectorOverlay::new(
+        let mut overlay = crate::model_selector::ModelSelectorOverlay::new(
             &self.available_models,
-        ));
+        );
+        overlay.set_max_visible(super::overlay_max_visible(self.term_height));
+        self.model_selector = Some(overlay);
     }
 
     pub(super) fn open_model_selector_configured_only(&mut self) {
@@ -91,6 +93,7 @@ impl PiApp {
 
         let mut overlay = crate::model_selector::ModelSelectorOverlay::new(&filtered);
         overlay.set_configured_only_scope(Self::unique_model_count(&self.available_models));
+        overlay.set_max_visible(super::overlay_max_visible(self.term_height));
         self.model_selector = Some(overlay);
     }
 

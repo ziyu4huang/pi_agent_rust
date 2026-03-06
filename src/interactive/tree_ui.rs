@@ -243,7 +243,9 @@ impl PiApp {
 
         match branches {
             Some(branches) if branches.len() > 1 => {
-                self.branch_picker = Some(BranchPickerOverlay::new(branches));
+                let mut picker = BranchPickerOverlay::new(branches);
+                picker.max_visible = super::overlay_max_visible(self.term_height);
+                self.branch_picker = Some(picker);
             }
             _ => {
                 self.status_message =

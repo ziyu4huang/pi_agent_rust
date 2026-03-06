@@ -1212,7 +1212,9 @@ impl PiApp {
                     return None;
                 }
 
-                self.settings_ui = Some(SettingsUiState::new());
+                let mut settings = SettingsUiState::new();
+                settings.max_visible = super::overlay_max_visible(self.term_height);
+                self.settings_ui = Some(settings);
                 self.session_picker = None;
                 self.autocomplete.close();
                 None
@@ -1282,10 +1284,12 @@ impl PiApp {
                     return None;
                 }
 
-                self.session_picker = Some(SessionPickerOverlay::new_with_root(
+                let mut picker = SessionPickerOverlay::new_with_root(
                     sessions,
                     Some(base_dir),
-                ));
+                );
+                picker.max_visible = super::overlay_max_visible(self.term_height);
+                self.session_picker = Some(picker);
                 self.autocomplete.close();
                 None
             }

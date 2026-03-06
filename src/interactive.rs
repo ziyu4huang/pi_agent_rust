@@ -134,6 +134,24 @@ use self::tree::{
 };
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Compute the maximum visible items for overlay pickers (model selector,
+/// session picker, settings, branch picker, etc.) based on the terminal height.
+///
+/// The overlay typically needs ~8 rows of chrome: title, search field, divider,
+/// pagination hint, detail line, help footer, and margins.  We reserve that
+/// overhead and clamp the result to `[3, 30]` so the UI stays usable on very
+/// small terminals while allowing taller lists on large ones.
+fn overlay_max_visible(term_height: usize) -> usize {
+    const OVERLAY_CHROME_ROWS: usize = 8;
+    term_height
+        .saturating_sub(OVERLAY_CHROME_ROWS)
+        .clamp(3, 30)
+}
+
+// ============================================================================
 // Slash Commands
 // ============================================================================
 
@@ -492,7 +510,9 @@ impl PiApp {
             }
             SettingsUiEntry::Theme => {
                 self.settings_ui = None;
-                self.theme_picker = Some(ThemePickerOverlay::new(&self.cwd));
+                let mut picker = ThemePickerOverlay::new(&self.cwd);
+                picker.max_visible = overlay_max_visible(self.term_height);
+                self.theme_picker = Some(picker);
             }
             SettingsUiEntry::Summary => {}
         }
@@ -940,6 +960,24 @@ impl PiApp {
 
         self.message_render_cache.invalidate_all();
         self.resize_conversation_viewport();
+
+        // Adapt open overlay pickers to the new terminal height.
+        let max_vis = overlay_max_visible(self.term_height);
+        if let Some(ref mut selector) = self.model_selector {
+            selector.set_max_visible(max_vis);
+        }
+        if let Some(ref mut picker) = self.session_picker {
+            picker.max_visible = max_vis;
+        }
+        if let Some(ref mut settings) = self.settings_ui {
+            settings.max_visible = max_vis;
+        }
+        if let Some(ref mut picker) = self.theme_picker {
+            picker.max_visible = max_vis;
+        }
+        if let Some(ref mut picker) = self.branch_picker {
+            picker.max_visible = max_vis;
+        }
     }
 
     fn accept_autocomplete(&mut self, item: &AutocompleteItem) {
@@ -1972,12 +2010,16 @@ impl PiApp {
                     }
                     KeyType::Esc => {
                         self.theme_picker = None;
-                        self.settings_ui = Some(SettingsUiState::new());
+                        let mut settings = SettingsUiState::new();
+                        settings.max_visible = overlay_max_visible(self.term_height);
+                        self.settings_ui = Some(settings);
                         return None;
                     }
                     KeyType::Runes if key.runes == ['q'] => {
                         self.theme_picker = None;
-                        self.settings_ui = Some(SettingsUiState::new());
+                        let mut settings = SettingsUiState::new();
+                        settings.max_visible = overlay_max_visible(self.term_height);
+                        self.settings_ui = Some(settings);
                         return None;
                     }
                     _ => {}
