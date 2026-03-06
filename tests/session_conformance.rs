@@ -751,7 +751,7 @@ fn save_round_trips_custom_entry() {
             custom_type: "note".to_string(),
             data: Some(json!({"tag":"demo"})),
         }));
-        session._test_set_leaf_id(Some(custom_id.clone()));
+        session._test_set_leaf_id(Some(custom_id));
 
         let loaded = save_and_reopen(&harness, &mut session).await;
         assert_contains_entry(

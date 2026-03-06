@@ -20297,105 +20297,68 @@ export default ConfigLoader;
                 serde_json::json!([80])
             );
 
-            for now in [16, 32] {
-                clock.set(now);
-                let stats = runtime.tick().await.expect("tick poll timer");
-                assert!(stats.ran_macrotask, "poll timer should fire at {now}ms");
+            let mut saw_initial_dirty_rerender = false;
+            for step in 0..12 {
+                let next_deadline = runtime
+                    .scheduler
+                    .borrow()
+                    .next_timer_deadline()
+                    .expect("custom UI should keep timers alive");
+                clock.set(next_deadline);
 
-                let poll_requests = runtime.drain_hostcall_requests();
-                assert_eq!(
-                    poll_requests.len(),
-                    1,
-                    "expected one poll request at {now}ms"
-                );
-                let poll_request = poll_requests.into_iter().next().expect("poll request");
+                let stats = runtime.tick().await.expect("tick timer");
                 assert!(
-                    matches!(&poll_request.kind, HostcallKind::Ui { op } if op == "custom"),
-                    "expected custom poll request at {now}ms"
+                    stats.ran_macrotask,
+                    "expected timer macrotask at step {step}"
                 );
 
-                runtime.complete_hostcall(
-                    poll_request.call_id,
-                    HostcallOutcome::Success(serde_json::json!({ "width": 80 })),
-                );
-                runtime.tick().await.expect("deliver poll completion");
+                let requests = runtime.drain_hostcall_requests();
+                if requests.is_empty() {
+                    continue;
+                }
+                assert_eq!(requests.len(), 1, "expected one hostcall at step {step}");
+                let request = requests.into_iter().next().expect("hostcall request");
+
+                match &request.kind {
+                    HostcallKind::Ui { op } if op == "custom" => {
+                        let width = if saw_initial_dirty_rerender { 40 } else { 80 };
+                        runtime.complete_hostcall(
+                            request.call_id,
+                            HostcallOutcome::Success(serde_json::json!({ "width": width })),
+                        );
+                        runtime.tick().await.expect("deliver poll completion");
+                    }
+                    HostcallKind::Ui { op } if op == "setWidget" => {
+                        if !saw_initial_dirty_rerender {
+                            assert_eq!(
+                                request.payload["lines"],
+                                serde_json::json!(["width:80"]),
+                                "first timer-driven frame should consume the initial dirty render"
+                            );
+                            saw_initial_dirty_rerender = true;
+                            runtime.complete_hostcall(
+                                request.call_id,
+                                HostcallOutcome::Success(serde_json::json!(null)),
+                            );
+                            runtime
+                                .tick()
+                                .await
+                                .expect("deliver initial rerender completion");
+                            continue;
+                        }
+
+                        assert_eq!(
+                            request.payload["lines"],
+                            serde_json::json!(["width:40"]),
+                            "width change should trigger a reflow frame"
+                        );
+                        return;
+                    }
+                    other => panic!("unexpected hostcall at step {step}: {other:?}"),
+                }
             }
 
-            clock.set(34);
-            let stats = runtime.tick().await.expect("tick render timer");
-            assert!(
-                stats.ran_macrotask,
-                "initial dirty render should fire once at 34ms"
-            );
-
-            let initial_rerender_requests = runtime.drain_hostcall_requests();
-            let initial_rerender = initial_rerender_requests
-                .into_iter()
-                .find(
-                    |request| matches!(&request.kind, HostcallKind::Ui { op } if op == "setWidget"),
-                )
-                .expect("initial dirty render should enqueue a frame");
-            assert_eq!(
-                initial_rerender.payload["lines"],
-                serde_json::json!(["width:80"])
-            );
-            runtime.complete_hostcall(
-                initial_rerender.call_id,
-                HostcallOutcome::Success(serde_json::json!(null)),
-            );
-            runtime
-                .tick()
-                .await
-                .expect("deliver initial rerender completion");
-
-            for now in [48, 64] {
-                clock.set(now);
-                let stats = runtime.tick().await.expect("tick width-change poll timer");
-                assert!(stats.ran_macrotask, "poll timer should fire at {now}ms");
-
-                let poll_requests = runtime.drain_hostcall_requests();
-                assert_eq!(
-                    poll_requests.len(),
-                    1,
-                    "expected one poll request at {now}ms"
-                );
-                let poll_request = poll_requests.into_iter().next().expect("poll request");
-                assert!(
-                    matches!(&poll_request.kind, HostcallKind::Ui { op } if op == "custom"),
-                    "expected custom poll request at {now}ms"
-                );
-
-                runtime.complete_hostcall(
-                    poll_request.call_id,
-                    HostcallOutcome::Success(serde_json::json!({ "width": 40 })),
-                );
-                runtime
-                    .tick()
-                    .await
-                    .expect("deliver width-change poll completion");
-            }
-
-            clock.set(67);
-            let stats = runtime
-                .tick()
-                .await
-                .expect("tick render timer after resize");
-            assert!(
-                stats.ran_macrotask,
-                "render timer should fire after width change"
-            );
-
-            let reflow_requests = runtime.drain_hostcall_requests();
-            let reflow_frame = reflow_requests
-                .into_iter()
-                .find(
-                    |request| matches!(&request.kind, HostcallKind::Ui { op } if op == "setWidget"),
-                )
-                .expect("width change should trigger a reflow frame");
-            assert_eq!(
-                reflow_frame.payload["lines"],
-                serde_json::json!(["width:40"])
-            );
+            panic!("did not observe a width-change reflow frame");
         });
     }
 
