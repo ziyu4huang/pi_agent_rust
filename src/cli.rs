@@ -2,6 +2,7 @@
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionCliFlag {
@@ -37,6 +38,7 @@ const ROOT_SUBCOMMANDS: &[&str] = &[
     "list",
     "config",
     "doctor",
+    "migrate",
 ];
 
 fn known_long_option(name: &str) -> Option<LongOptionSpec> {
@@ -96,6 +98,15 @@ fn is_known_short_flag(token: &str) -> bool {
     }
     body.chars()
         .all(|ch| matches!(ch, 'v' | 'c' | 'r' | 'p' | 'e'))
+}
+
+fn short_flag_expects_value(token: &str) -> bool {
+    if !is_known_short_flag(token) {
+        return false;
+    }
+
+    let body = &token[1..];
+    body.find('e').is_some_and(|index| index == body.len() - 1)
 }
 
 fn is_negative_numeric_token(token: &str) -> bool {
@@ -191,6 +202,7 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
         }
         if is_known_short_flag(token) {
             filtered.push(token.clone());
+            expecting_value = short_flag_expects_value(token);
             index += 1;
             continue;
         }
@@ -444,8 +456,8 @@ pub struct Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, parse_with_extension_flags};
-    use clap::Parser;
+    use super::{Cli, Commands, ROOT_SUBCOMMANDS, parse_with_extension_flags};
+    use clap::{CommandFactory, Parser};
 
     // ── 1. Basic flag parsing ────────────────────────────────────────
 
@@ -882,6 +894,12 @@ mod tests {
         assert_eq!(cli.enabled_tools(), vec!["read", "bash", "edit"]);
     }
 
+    #[test]
+    fn tools_ignore_empty_entries_and_duplicates() {
+        let cli = Cli::parse_from(["pi", "--tools", "read,, bash,read, ,grep,bash"]);
+        assert_eq!(cli.enabled_tools(), vec!["read", "bash", "grep"]);
+    }
+
     // ── 7. Invalid inputs ────────────────────────────────────────────
 
     #[test]
@@ -1006,6 +1024,43 @@ mod tests {
             "pkg".to_string(),
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn extension_flags_survive_short_cluster_ending_in_e() {
+        let parsed = parse_with_extension_flags(vec![
+            "pi".to_string(),
+            "-pe".to_string(),
+            "ext.js".to_string(),
+            "--plan".to_string(),
+            "ship-it".to_string(),
+            "hello".to_string(),
+        ])
+        .expect("parse short cluster with extension");
+
+        assert!(parsed.cli.print);
+        assert_eq!(parsed.cli.extension, vec!["ext.js".to_string()]);
+        assert_eq!(parsed.cli.message_args(), vec!["hello"]);
+        assert_eq!(parsed.extension_flags.len(), 1);
+        assert_eq!(parsed.extension_flags[0].name, "plan");
+        assert_eq!(parsed.extension_flags[0].value.as_deref(), Some("ship-it"));
+    }
+
+    #[test]
+    fn root_subcommands_constant_matches_clap_parser() {
+        let mut actual = Cli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .collect::<Vec<_>>();
+        actual.sort();
+
+        let mut expected = ROOT_SUBCOMMANDS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        expected.sort();
+
+        assert_eq!(expected, actual);
     }
 
     // ── 8. Multiple append flags ─────────────────────────────────────
@@ -1319,7 +1374,7 @@ mod tests {
     mod proptest_cli {
         use crate::cli::{
             ExtensionCliFlag, ROOT_SUBCOMMANDS, is_known_short_flag, is_negative_numeric_token,
-            known_long_option, preprocess_extension_flags,
+            known_long_option, preprocess_extension_flags, short_flag_expects_value,
         };
         use proptest::prelude::*;
 
@@ -1366,6 +1421,28 @@ mod tests {
                 assert!(
                     !is_known_short_flag(&token),
                     "'--{body}' should not be a short flag"
+                );
+            }
+
+            #[test]
+            fn short_flag_expects_value_when_cluster_ends_with_e(
+                prefix in prop::sample::select(vec!["", "p", "c", "vp"]),
+            ) {
+                let token = format!("-{prefix}e");
+                assert!(
+                    short_flag_expects_value(&token),
+                    "'{token}' should expect a following value"
+                );
+            }
+
+            #[test]
+            fn short_flag_does_not_expect_value_when_e_has_inline_value(
+                suffix in prop::sample::select(vec!["v", "c", "r", "p", "vc"]),
+            ) {
+                let token = format!("-e{suffix}");
+                assert!(
+                    !short_flag_expects_value(&token),
+                    "'{token}' should treat '{suffix}' as the inline -e value"
                 );
             }
 
@@ -1487,6 +1564,7 @@ mod tests {
             fn preprocess_subcommand_barrier(
                 subcommand in prop::sample::select(vec![
                     "install", "remove", "update", "search", "info", "list", "config", "doctor",
+                    "migrate",
                 ]),
             ) {
                 let args: Vec<String> = vec![
@@ -1641,7 +1719,13 @@ impl Cli {
         if self.no_tools {
             vec![]
         } else {
-            self.tools.split(',').map(str::trim).collect()
+            let mut seen = HashSet::new();
+            self.tools
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .filter(|name| seen.insert(*name))
+                .collect()
         }
     }
 }
