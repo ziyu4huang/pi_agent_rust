@@ -3152,7 +3152,7 @@ fn process_rg_json_match_line(
     matches: &mut Vec<(PathBuf, usize)>,
     match_count: &mut usize,
     match_limit_reached: &mut bool,
-    effective_limit: usize,
+    scan_limit: usize,
 ) {
     if *match_limit_reached {
         return;
@@ -3192,7 +3192,7 @@ fn process_rg_json_match_line(
         matches.push((fp, ln));
     }
 
-    if *match_count >= effective_limit {
+    if *match_count >= scan_limit {
         *match_limit_reached = true;
     }
 }
@@ -3202,7 +3202,7 @@ fn drain_rg_stdout(
     matches: &mut Vec<(PathBuf, usize)>,
     match_count: &mut usize,
     match_limit_reached: &mut bool,
-    effective_limit: usize,
+    scan_limit: usize,
 ) {
     while let Ok(line_res) = stdout_rx.try_recv() {
         process_rg_json_match_line(
@@ -3210,7 +3210,7 @@ fn drain_rg_stdout(
             matches,
             match_count,
             match_limit_reached,
-            effective_limit,
+            scan_limit,
         );
         if *match_limit_reached {
             break;
@@ -3319,6 +3319,8 @@ impl Tool for GrepTool {
 
         let context_value = input.context.unwrap_or(0);
         let effective_limit = input.limit.unwrap_or(DEFAULT_GREP_LIMIT).max(1);
+        // Overfetch one match so limit notices only appear after confirmed overflow.
+        let scan_limit = effective_limit.saturating_add(1);
 
         let mut args: Vec<String> = vec![
             "--json".to_string(),
@@ -3422,7 +3424,7 @@ impl Tool for GrepTool {
 
         let mut matches: Vec<(PathBuf, usize)> = Vec::new();
         let mut match_count: usize = 0;
-        let mut match_limit_reached = false;
+        let mut match_scan_limit_reached = false;
         let mut stderr_bytes = Vec::new();
 
         let tick = Duration::from_millis(10);
@@ -3432,12 +3434,12 @@ impl Tool for GrepTool {
                 &stdout_rx,
                 &mut matches,
                 &mut match_count,
-                &mut match_limit_reached,
-                effective_limit,
+                &mut match_scan_limit_reached,
+                scan_limit,
             );
             drain_rg_stderr(&stderr_rx, &mut stderr_bytes)?;
 
-            if match_limit_reached {
+            if match_scan_limit_reached {
                 break;
             }
 
@@ -3458,11 +3460,11 @@ impl Tool for GrepTool {
             &stdout_rx,
             &mut matches,
             &mut match_count,
-            &mut match_limit_reached,
-            effective_limit,
+            &mut match_scan_limit_reached,
+            scan_limit,
         );
 
-        let code = if match_limit_reached {
+        let code = if match_scan_limit_reached {
             // Avoid buffering unbounded stdout/stderr once we've hit the match limit.
             // `kill()` also waits, ensuring the stdout reader threads can exit promptly.
             guard
@@ -3484,15 +3486,15 @@ impl Tool for GrepTool {
         // bounded channel can fill and block the sender thread, causing join()
         // to hang after ripgrep has already exited.
         while !stdout_thread.is_finished() || !stderr_thread.is_finished() {
-            if match_limit_reached {
+            if match_scan_limit_reached {
                 while stdout_rx.try_recv().is_ok() {}
             } else {
                 drain_rg_stdout(
                     &stdout_rx,
                     &mut matches,
                     &mut match_count,
-                    &mut match_limit_reached,
-                    effective_limit,
+                    &mut match_scan_limit_reached,
+                    scan_limit,
                 );
             }
             drain_rg_stderr(&stderr_rx, &mut stderr_bytes)?;
@@ -3511,27 +3513,33 @@ impl Tool for GrepTool {
             .map_err(|_| Error::tool("grep", "ripgrep stderr reader thread panicked"))?;
 
         // Drain any remaining stdout/stderr produced after the last poll.
-        if match_limit_reached {
+        if match_scan_limit_reached {
             while stdout_rx.try_recv().is_ok() {}
         } else {
             drain_rg_stdout(
                 &stdout_rx,
                 &mut matches,
                 &mut match_count,
-                &mut match_limit_reached,
-                effective_limit,
+                &mut match_scan_limit_reached,
+                scan_limit,
             );
         }
         drain_rg_stderr(&stderr_rx, &mut stderr_bytes)?;
 
         let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-        if !match_limit_reached && code != 0 && code != 1 {
+        if !match_scan_limit_reached && code != 0 && code != 1 {
             let msg = if stderr_text.is_empty() {
                 format!("ripgrep exited with code {code}")
             } else {
                 stderr_text
             };
             return Err(Error::tool("grep", msg));
+        }
+
+        let match_limit_reached = match_count > effective_limit;
+        if match_limit_reached {
+            matches.truncate(effective_limit);
+            match_count = effective_limit;
         }
 
         if match_count == 0 {
@@ -3754,6 +3762,8 @@ impl Tool for FindTool {
         let search_dir = input.path.as_deref().unwrap_or(".");
         let search_path = strip_unc_prefix(resolve_read_path(search_dir, &self.cwd));
         let effective_limit = input.limit.unwrap_or(DEFAULT_FIND_LIMIT);
+        // Overfetch one result so limit notices only appear after confirmed overflow.
+        let scan_limit = effective_limit.saturating_add(1);
 
         if !search_path.exists() {
             return Err(Error::tool(
@@ -3775,7 +3785,7 @@ impl Tool for FindTool {
             "--color=never".to_string(),
             "--hidden".to_string(),
             "--max-results".to_string(),
-            effective_limit.to_string(),
+            scan_limit.to_string(),
         ];
 
         // NOTE: We rely on fd's native .gitignore discovery. We only explicitly pass
@@ -3933,7 +3943,10 @@ impl Tool for FindTool {
             });
         }
 
-        let result_limit_reached = relativized.len() >= effective_limit;
+        let result_limit_reached = relativized.len() > effective_limit;
+        if result_limit_reached {
+            relativized.truncate(effective_limit);
+        }
         let raw_output = relativized.join("\n");
         let mut truncation = truncate_head(raw_output, usize::MAX, DEFAULT_MAX_BYTES);
 
@@ -6603,6 +6616,46 @@ mod tests {
     }
 
     #[test]
+    fn test_grep_exact_limit_does_not_report_limit_reached() {
+        asupersync::test_utils::run_test(|| async {
+            let tmp = tempfile::tempdir().unwrap();
+            let content = (0..5)
+                .map(|i| format!("match_line_{i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(tmp.path().join("exact.txt"), &content).unwrap();
+
+            let tool = GrepTool::new(tmp.path());
+            let out = tool
+                .execute(
+                    "t",
+                    serde_json::json!({
+                        "pattern": "match_line",
+                        "path": tmp.path().join("exact.txt").to_string_lossy(),
+                        "limit": 5
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let text = get_text(&out.content);
+            assert_eq!(text.matches("match_line_").count(), 5);
+            assert!(
+                !text.contains("matches limit reached"),
+                "exact-limit grep results should not claim truncation: {text}"
+            );
+            assert!(
+                out.details
+                    .as_ref()
+                    .and_then(|details| details.get("matchLimitReached"))
+                    .is_none(),
+                "exact-limit grep results should not set matchLimitReached"
+            );
+        });
+    }
+
+    #[test]
     fn test_grep_large_output_does_not_deadlock_reader_threads() {
         asupersync::test_utils::run_test(|| async {
             use std::fmt::Write as _;
@@ -6840,6 +6893,47 @@ mod tests {
                     .get("resultLimitReached")
                     .and_then(serde_json::Value::as_u64),
                 Some(5)
+            );
+        });
+    }
+
+    #[test]
+    fn test_find_exact_limit_does_not_report_limit_reached() {
+        asupersync::test_utils::run_test(|| async {
+            if find_fd_binary().is_none() {
+                return;
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            for i in 0..5 {
+                std::fs::write(tmp.path().join(format!("f{i}.txt")), "").unwrap();
+            }
+
+            let tool = FindTool::new(tmp.path());
+            let out = tool
+                .execute(
+                    "t",
+                    serde_json::json!({
+                        "pattern": "*.txt",
+                        "path": tmp.path().to_string_lossy(),
+                        "limit": 5
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let text = get_text(&out.content);
+            assert_eq!(text.lines().filter(|line| line.contains(".txt")).count(), 5);
+            assert!(
+                !text.contains("results limit reached"),
+                "exact-limit find results should not claim truncation: {text}"
+            );
+            assert!(
+                out.details
+                    .as_ref()
+                    .and_then(|details| details.get("resultLimitReached"))
+                    .is_none(),
+                "exact-limit find results should not set resultLimitReached"
             );
         });
     }
