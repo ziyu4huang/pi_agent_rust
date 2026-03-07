@@ -597,6 +597,12 @@ where
             return;
         }
 
+        tracing::warn!(
+            content_index = idx,
+            old_len = block.text.len(),
+            new_len = text.len(),
+            "text snapshot does not extend accumulated text; replacing"
+        );
         block.text = text;
     }
 
@@ -629,6 +635,12 @@ where
             return;
         }
 
+        tracing::warn!(
+            content_index = idx,
+            old_len = block.thinking.len(),
+            new_len = text.len(),
+            "reasoning snapshot does not extend accumulated thinking; replacing"
+        );
         block.thinking = text;
     }
 

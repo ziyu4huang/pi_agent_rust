@@ -427,6 +427,7 @@ where
             self.partial.stop_reason = match reason.as_str() {
                 "MAX_TOKENS" => StopReason::Length,
                 "SAFETY" | "RECITATION" | "OTHER" => StopReason::Error,
+                "FUNCTION_CALL" => StopReason::ToolUse,
                 _ => StopReason::Stop,
             };
         }
