@@ -356,7 +356,7 @@ pub fn run_doctor(opts: &DoctorOptions<'_>) -> Result<DoctorReport> {
             .as_ref()
             .is_none_or(|set| set.contains(&CheckCategory::Extensions))
         {
-            check_extension(opts.cwd, ext_path, opts.policy_override, &mut findings)?;
+            check_extension(opts.cwd, ext_path, opts.policy_override, &mut findings);
         }
     } else if opts
         .only
@@ -1100,7 +1100,7 @@ fn check_extension(
     path: &str,
     policy_override: Option<&str>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) {
     use crate::extension_preflight::{FindingSeverity, PreflightAnalyzer, PreflightVerdict};
 
     let cat = CheckCategory::Extensions;
@@ -1118,7 +1118,7 @@ fn check_extension(
             )
             .with_remediation("Check the path and try again"),
         );
-        return Ok(());
+        return;
     }
 
     let config_path = Config::config_path_override_from_env(cwd);
@@ -1200,8 +1200,6 @@ fn check_extension(
         }
         findings.push(f);
     }
-
-    Ok(())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

@@ -1668,7 +1668,7 @@ where
                 api: "openai-completions".to_string(),
                 provider: provider.to_string(),
                 base_url,
-                reasoning: true,
+                reasoning: effective_reasoning(model_id, true),
                 input: vec![InputType::Text],
                 cost: ModelCost {
                     input: 0.0,
@@ -3054,6 +3054,30 @@ mod tests {
     #[test]
     fn ad_hoc_model_entry_sap_without_credentials_returns_none() {
         assert!(ad_hoc_model_entry_with_sap_resolver("sap-ai-core", "dep-123", || None).is_none());
+    }
+
+    #[test]
+    fn ad_hoc_model_entry_sap_uses_effective_reasoning() {
+        let sap_creds = || {
+            Some(SapResolvedCredentials {
+                client_id: "id".to_string(),
+                client_secret: "secret".to_string(),
+                token_url: "https://auth.sap.example.com/oauth/token".to_string(),
+                service_url: "https://api.ai.sap.example.com".to_string(),
+            })
+        };
+
+        // A reasoning model (gpt-5.2) should have reasoning = true.
+        let reasoning_entry =
+            ad_hoc_model_entry_with_sap_resolver("sap-ai-core", "gpt-5.2", sap_creds)
+                .expect("reasoning sap entry");
+        assert!(reasoning_entry.model.reasoning);
+
+        // A non-reasoning model (gpt-4o) should have reasoning = false.
+        let non_reasoning_entry =
+            ad_hoc_model_entry_with_sap_resolver("sap-ai-core", "gpt-4o", sap_creds)
+                .expect("non-reasoning sap entry");
+        assert!(!non_reasoning_entry.model.reasoning);
     }
 
     // ─── merge_headers ───────────────────────────────────────────────
