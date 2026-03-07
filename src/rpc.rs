@@ -24,7 +24,7 @@ use crate::extensions::{ExtensionManager, ExtensionUiRequest, ExtensionUiRespons
 use crate::model::{
     ContentBlock, ImageContent, Message, StopReason, TextContent, UserContent, UserMessage,
 };
-use crate::models::{ModelEntry, model_requires_configured_credential};
+use crate::models::{ModelEntry, model_requires_configured_credential, normalize_api_key_opt};
 use crate::provider_metadata::provider_ids_match;
 use crate::providers;
 use crate::resources::ResourceLoader;
@@ -3724,13 +3724,6 @@ fn parse_prompt_images(value: Option<&Value>) -> Result<Vec<ImageContent>> {
 fn resolve_model_key(auth: &AuthStorage, entry: &ModelEntry) -> Option<String> {
     normalize_api_key_opt(auth.resolve_api_key(&entry.model.provider, None))
         .or_else(|| normalize_api_key_opt(entry.api_key.clone()))
-}
-
-fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
-    api_key.and_then(|key| {
-        let trimmed = key.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
 }
 
 fn parse_thinking_level(level: &str) -> Result<crate::model::ThinkingLevel> {

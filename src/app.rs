@@ -15,7 +15,7 @@ use crate::auth::AuthStorage;
 use crate::cli;
 use crate::config::Config;
 use crate::model::{self, AssistantMessage, ContentBlock, ImageContent, TextContent};
-use crate::models::{ModelEntry, ModelRegistry, default_models_path, model_entry_is_ready, model_requires_configured_credential};
+use crate::models::{ModelEntry, ModelRegistry, default_models_path, model_entry_is_ready, model_requires_configured_credential, normalize_api_key_opt};
 use crate::provider::{StreamOptions, ThinkingBudgets};
 use crate::provider_metadata::{canonical_provider_id, provider_ids_match, split_provider_model_spec};
 use crate::session::Session;
@@ -745,13 +745,6 @@ fn default_model_from_candidates(candidates: &[ModelEntry]) -> ModelEntry {
     }
 
     candidates[0].clone()
-}
-
-fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
-    api_key.and_then(|key| {
-        let trimmed = key.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
 }
 
 pub fn resolve_api_key(

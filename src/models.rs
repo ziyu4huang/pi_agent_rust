@@ -436,6 +436,13 @@ pub fn model_catalog_cache_fingerprint() -> u64 {
     })
 }
 
+pub(crate) fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
+    api_key.and_then(|key| {
+        let trimmed = key.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 pub(crate) fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
     let provider = entry.model.provider.as_str();
     entry.auth_header

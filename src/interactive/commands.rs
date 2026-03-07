@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::models::{ModelEntry, model_requires_configured_credential};
+use crate::models::{ModelEntry, model_requires_configured_credential, normalize_api_key_opt};
 use crate::provider_metadata::{provider_ids_match, split_provider_model_spec};
 
 #[cfg(feature = "clipboard")]
@@ -446,13 +446,6 @@ pub fn model_entry_matches(left: &ModelEntry, right: &ModelEntry) -> bool {
 
     left_provider.eq_ignore_ascii_case(right_provider)
         && left.model.id.eq_ignore_ascii_case(&right.model.id)
-}
-
-pub(super) fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
-    api_key.and_then(|key| {
-        let trimmed = key.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
 }
 
 pub(super) fn resolve_model_key_with_auth(
