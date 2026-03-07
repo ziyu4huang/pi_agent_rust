@@ -30,12 +30,10 @@ pub(super) fn parse_quoted_file_ref(text: &str, start: usize) -> Option<(String,
 
     for (offset, ch) in text[after_quote..].char_indices() {
         if escaped {
-            if ch == quote || ch == '\\' {
-                path.push(ch);
-            } else {
+            if ch != quote && ch != '\\' {
                 path.push('\\');
-                path.push(ch);
             }
+            path.push(ch);
             escaped = false;
             continue;
         }
@@ -191,7 +189,7 @@ mod tests {
         let parsed = parse_quoted_file_ref(text, 0);
         assert_eq!(
             parsed,
-            Some(("foo\\bar\"baz.txt".to_string(), "".to_string(), text.len()))
+            Some(("foo\\bar\"baz.txt".to_string(), String::new(), text.len()))
         );
     }
 
