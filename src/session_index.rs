@@ -98,7 +98,7 @@ impl SessionIndex {
                        message_count=excluded.message_count,
                        last_modified_ms=excluded.last_modified_ms,
                        size_bytes=excluded.size_bytes,
-                       name=COALESCE(excluded.name, sessions.name)",
+                       name=excluded.name",
                     &[
                         Value::Text(meta.path),
                         Value::Text(meta.id),
@@ -1630,6 +1630,48 @@ mod tests {
         let sessions = index.list_sessions(None).expect("list");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name.as_deref(), Some("My Project"));
+    }
+
+    #[test]
+    fn index_session_update_clears_stale_session_name() {
+        let harness = TestHarness::new("index_session_update_clears_stale_session_name");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        let session_path = harness.temp_path("sessions/project/clear-name.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        fs::write(&session_path, "first").expect("write");
+
+        let mut named = Session::in_memory();
+        named.header = make_header("id-clear-name", "cwd-clear-name");
+        named.path = Some(session_path.clone());
+        named.entries.push(make_user_entry(None, "m1", "hi"));
+        named.entries.push(make_session_info_entry(
+            Some("m1".to_string()),
+            "info1",
+            Some("My Project"),
+        ));
+
+        index.index_session(&named).expect("index named session");
+        let first = index.list_sessions(None).expect("list named");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name.as_deref(), Some("My Project"));
+
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(&session_path, "second").expect("rewrite");
+
+        let mut unnamed = Session::in_memory();
+        unnamed.header = make_header("id-clear-name", "cwd-clear-name");
+        unnamed.path = Some(session_path);
+        unnamed.entries.push(make_user_entry(None, "m1", "hi"));
+
+        index
+            .index_session(&unnamed)
+            .expect("index unnamed session");
+        let second = index.list_sessions(None).expect("list unnamed");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].name, None);
     }
 
     // ── Multiple cwd filtering ──────────────────────────────────────
