@@ -153,3 +153,10 @@ src/bin/test_time.rs
 
 # Codex cargo home (build cache)
 .codex-cargo-home/
+
+# Compiler artifacts
+*.rlib
+
+# Ephemeral patch/diff and scratch scripts
+/patch.diff
+/test_script.sh
