@@ -3,6 +3,7 @@
 //! Checks are non-blocking, cached for 24 hours, and configurable via
 //! `check_for_updates` in settings.json.
 
+use semver::{BuildMetadata, Version};
 use std::path::{Path, PathBuf};
 
 /// Current crate version (from Cargo.toml).
@@ -27,21 +28,35 @@ pub enum VersionCheckResult {
 /// Returns `true` if `latest` is strictly newer than `current`.
 #[must_use]
 pub fn is_newer(current: &str, latest: &str) -> bool {
-    let parse = |v: &str| -> Option<(u32, u32, u32)> {
-        let v = v.strip_prefix('v').unwrap_or(v);
-        // Strip pre-release suffix (e.g. "1.2.3-dev")
-        let v = v.split('-').next()?;
-        let mut parts = v.splitn(3, '.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        Some((major, minor, patch))
-    };
-
-    match (parse(current), parse(latest)) {
-        (Some(c), Some(l)) => l > c,
+    match (parse_semver_like(current), parse_semver_like(latest)) {
+        (Some(current), Some(latest)) => latest > current,
         _ => false,
     }
+}
+
+fn parse_semver_like(version: &str) -> Option<Version> {
+    let version = version.strip_prefix('v').unwrap_or(version).trim();
+    if version.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = Version::parse(version) {
+        return Some(strip_build_metadata(parsed));
+    }
+
+    let suffix_idx = version.find(['-', '+']).unwrap_or(version.len());
+    let (core, suffix) = version.split_at(suffix_idx);
+    if core.split('.').count() != 2 {
+        return None;
+    }
+
+    Version::parse(&format!("{core}.0{suffix}"))
+        .ok()
+        .map(strip_build_metadata)
+}
+
+fn strip_build_metadata(mut version: Version) -> Version {
+    version.build = BuildMetadata::EMPTY;
+    version
 }
 
 /// Path to the version check cache file.
@@ -89,13 +104,27 @@ fn write_cached_version_at(path: &Path, version: &str) {
 /// a background task with the HTTP client).
 #[must_use]
 pub fn check_cached() -> VersionCheckResult {
-    read_cached_version().map_or(VersionCheckResult::Failed, |latest| {
-        if is_newer(CURRENT_VERSION, &latest) {
-            VersionCheckResult::UpdateAvailable { latest }
-        } else {
-            VersionCheckResult::UpToDate
+    check_cached_at(&cache_path(), CURRENT_VERSION)
+}
+
+fn check_cached_at(path: &Path, current_version: &str) -> VersionCheckResult {
+    let Some(latest) = read_cached_version_at(path) else {
+        return VersionCheckResult::Failed;
+    };
+
+    match (
+        parse_semver_like(current_version),
+        parse_semver_like(&latest),
+    ) {
+        (Some(current), Some(latest_version)) => {
+            if latest_version > current {
+                VersionCheckResult::UpdateAvailable { latest }
+            } else {
+                VersionCheckResult::UpToDate
+            }
         }
-    })
+        _ => VersionCheckResult::Failed,
+    }
 }
 
 /// Parse the latest version from a GitHub releases API JSON response.
@@ -140,9 +169,15 @@ mod tests {
 
     #[test]
     fn is_newer_with_prerelease() {
-        // Pre-release suffix is stripped for comparison
-        assert!(!is_newer("1.2.3-dev", "1.2.3"));
+        assert!(is_newer("1.2.3-dev", "1.2.3"));
         assert!(is_newer("1.2.3-dev", "1.3.0"));
+        assert!(!is_newer("1.2.3", "1.2.3-dev"));
+    }
+
+    #[test]
+    fn is_newer_ignores_build_metadata() {
+        assert!(!is_newer("1.2.3+build.1", "1.2.3+build.2"));
+        assert!(!is_newer("1.2.3", "1.2.3+build.2"));
     }
 
     #[test]
@@ -205,6 +240,17 @@ mod tests {
         assert_eq!(read_cached_version_at(&path), None);
     }
 
+    #[test]
+    fn check_cached_invalid_cached_version_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache");
+        write_cached_version_at(&path, "not-a-version");
+        assert!(matches!(
+            check_cached_at(&path, "1.2.3"),
+            VersionCheckResult::Failed
+        ));
+    }
+
     mod proptest_version_check {
         use super::*;
         use proptest::prelude::*;
@@ -251,9 +297,9 @@ mod tests {
                 );
             }
 
-            /// Pre-release suffix is ignored for comparison.
+            /// A stable release must outrank the matching prerelease.
             #[test]
-            fn prerelease_stripped(
+            fn release_outranks_prerelease(
                 major in 0..100u32,
                 minor in 0..100u32,
                 patch in 0..100u32,
@@ -261,9 +307,23 @@ mod tests {
             ) {
                 let plain = format!("{major}.{minor}.{patch}");
                 let pre = format!("{major}.{minor}.{patch}-{suffix}");
-                // Same version regardless of suffix
                 assert!(!is_newer(&plain, &pre));
-                assert!(!is_newer(&pre, &plain));
+                assert!(is_newer(&pre, &plain));
+            }
+
+            /// Build metadata must not change ordering.
+            #[test]
+            fn build_metadata_does_not_change_ordering(
+                major in 0..100u32,
+                minor in 0..100u32,
+                patch in 0..100u32,
+                build_a in "[a-z0-9]{1,8}",
+                build_b in "[a-z0-9]{1,8}"
+            ) {
+                let with_a = format!("{major}.{minor}.{patch}+{build_a}");
+                let with_b = format!("{major}.{minor}.{patch}+{build_b}");
+                assert!(!is_newer(&with_a, &with_b));
+                assert!(!is_newer(&with_b, &with_a));
             }
 
             /// Garbage strings never report newer.
