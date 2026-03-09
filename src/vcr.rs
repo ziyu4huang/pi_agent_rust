@@ -54,11 +54,14 @@ fn test_env_var_with<F>(
 where
     F: FnOnce() -> Option<String>,
 {
-    let guard = overrides
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(maybe_value) = guard.get(name) {
-        return maybe_value.clone();
+    let maybe_value = {
+        let guard = overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.get(name).cloned()
+    };
+    if let Some(maybe_value) = maybe_value {
+        return maybe_value;
     }
     fallback()
 }
@@ -1202,6 +1205,24 @@ mod tests {
         assert_eq!(
             test_env_var_with(&overrides, TEST_VAR, || Some("host-value".to_string())),
             None
+        );
+    }
+
+    #[test]
+    fn test_env_var_with_drops_lock_before_running_fallback() {
+        const TEST_VAR: &str = "PI_AGENT_VCR_TEST_FALLBACK_LOCK";
+        let overrides = Mutex::new(HashMap::new());
+
+        assert_eq!(
+            test_env_var_with(&overrides, TEST_VAR, || {
+                let guard = overrides
+                    .try_lock()
+                    .expect("fallback should reacquire lock");
+                drop(guard);
+                Some("host-value".to_string())
+            })
+            .as_deref(),
+            Some("host-value")
         );
     }
 
