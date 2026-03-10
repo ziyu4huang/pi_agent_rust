@@ -160,3 +160,14 @@ src/bin/test_time.rs
 # Ephemeral patch/diff and scratch scripts
 /patch.diff
 /test_script.sh
+
+# UBS root-level scan artifacts
+/ubs.json
+/ubs.jsonl
+/ubs-report.txt
+/ubs_tools.jsonl
+/check.json
+
+# Agent-generated search/fix scripts
+/find_async_fs.py
+/fix_tools_write.rs
