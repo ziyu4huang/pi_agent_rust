@@ -2493,10 +2493,18 @@ fn collect_files_recursive(dir: &Path, ext: &str) -> Vec<PathBuf> {
     out
 }
 
+fn canonical_identity_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn collect_skill_entries(dir: &Path) -> Vec<PathBuf> {
     if !dir.exists() {
         return Vec::new();
     }
+
+    let visited_dirs = std::sync::Mutex::new(std::collections::HashSet::new());
+    let mut out = Vec::new();
+    let mut seen_files = std::collections::HashSet::new();
 
     let mut builder = ignore::WalkBuilder::new(dir);
     builder
@@ -2505,26 +2513,44 @@ fn collect_skill_entries(dir: &Path) -> Vec<PathBuf> {
         .git_global(false)
         .git_exclude(false)
         .add_custom_ignore_filename(".fdignore")
-        .filter_entry(|e| e.file_name() != std::ffi::OsStr::new("node_modules"));
+        .filter_entry(move |entry| {
+            let name = entry.file_name().to_string_lossy();
+            if name == "node_modules" {
+                return false;
+            }
 
-    let mut out = Vec::new();
+            if !entry.path().is_dir() {
+                return true;
+            }
+
+            let canonical_dir = canonical_identity_path(entry.path());
+            visited_dirs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(canonical_dir)
+        });
+
     for entry in builder.build().filter_map(std::result::Result::ok) {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
+
         let rel = path.strip_prefix(dir).unwrap_or(path);
         let depth = rel.components().count();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let is_top_level_md = depth == 1 && path.extension().and_then(|e| e.to_str()) == Some("md");
+        let is_nested_skill = depth > 1 && name == "SKILL.md";
+        if !is_top_level_md && !is_nested_skill {
+            continue;
+        }
 
-        if depth == 1 {
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                out.push(path.to_path_buf());
-            }
-        } else if name == "SKILL.md" {
+        let canonical_file = canonical_identity_path(path);
+        if seen_files.insert(canonical_file) {
             out.push(path.to_path_buf());
         }
     }
+
     out
 }
 
@@ -5681,6 +5707,46 @@ mod tests {
                 .iter()
                 .any(|p| p.file_name().unwrap() == "readme.txt")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_skill_entries_ignores_symlink_cycles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("my-skill");
+        fs::create_dir_all(&skill_dir).expect("create dir");
+        fs::write(skill_dir.join("SKILL.md"), "# Skill").expect("write skill");
+
+        let loop_link = skill_dir.join("loop");
+        std::os::unix::fs::symlink(&skill_dir, &loop_link).expect("create symlink loop");
+
+        let entries = collect_skill_entries(&skills_dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], skill_dir.join("SKILL.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_skill_entries_dedupes_alias_symlink_to_same_skill_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skills_dir = dir.path().join("skills");
+        let real_root = skills_dir.join("real");
+        let skill_dir = real_root.join("my-skill");
+        fs::create_dir_all(&skill_dir).expect("create dir");
+        fs::write(skill_dir.join("SKILL.md"), "# Skill").expect("write skill");
+
+        std::os::unix::fs::symlink(&real_root, skills_dir.join("alias"))
+            .expect("create alias symlink");
+
+        let entries = collect_skill_entries(&skills_dir);
+        assert_eq!(entries.len(), 1);
+        let canonical_entries = entries
+            .iter()
+            .map(|path| canonical_identity_path(path))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(canonical_entries.len(), 1);
+        assert!(canonical_entries.contains(&canonical_identity_path(&skill_dir.join("SKILL.md"))));
     }
 
     // ======================================================================

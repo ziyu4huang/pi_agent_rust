@@ -18272,6 +18272,23 @@ if (typeof globalThis.clearInterval !== 'function') {
 }
 
 if (typeof globalThis.fetch !== 'function') {
+    const __pi_fetch_body_bytes_to_base64 = (value) => {
+        let bytes = null;
+        if (value instanceof Uint8Array) {
+            bytes = value;
+        } else if (value instanceof ArrayBuffer) {
+            bytes = new Uint8Array(value);
+        } else if (ArrayBuffer.isView && ArrayBuffer.isView(value)) {
+            bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        }
+        if (!bytes) return null;
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return __pi_base64_encode_native(binary);
+    };
+
     class Headers {
         constructor(init) {
             this._map = {};
@@ -18500,11 +18517,21 @@ if (typeof globalThis.fetch !== 'function') {
         }
 
         let body = undefined;
+        let body_bytes = undefined;
         if (options.body !== undefined && options.body !== null) {
-            body = typeof options.body === 'string' ? options.body : String(options.body);
+            const encoded = __pi_fetch_body_bytes_to_base64(options.body);
+            if (encoded !== null) {
+                body_bytes = encoded;
+            } else {
+                body = typeof options.body === 'string' ? options.body : String(options.body);
+            }
         }
 
-        const resp = await pi.http({ url, method, headers, body });
+        const request = { url, method, headers };
+        if (body !== undefined) request.body = body;
+        if (body_bytes !== undefined) request.body_bytes = body_bytes;
+
+        const resp = await pi.http(request);
         const status = resp && resp.status !== undefined ? Number(resp.status) : 0;
         const respHeaders = resp && resp.headers && typeof resp.headers === 'object' ? resp.headers : {};
 
@@ -20568,6 +20595,46 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
             assert!(matches!(&requests[0].kind, HostcallKind::Tool { name } if name == "read"));
             assert!(matches!(&requests[1].kind, HostcallKind::Exec { cmd } if cmd == "ls"));
             assert!(matches!(&requests[2].kind, HostcallKind::Http));
+        });
+    }
+
+    #[test]
+    fn pijs_fetch_binary_body_uses_body_bytes_hostcall() {
+        futures::executor::block_on(async {
+            let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))
+                .await
+                .expect("create runtime");
+
+            runtime
+                .eval(
+                    r#"
+            fetch("https://example.com/upload", {
+                method: "POST",
+                headers: { "content-type": "application/octet-stream" },
+                body: new Uint8Array([0, 1, 2, 255]),
+            });
+        "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+            assert!(matches!(&requests[0].kind, HostcallKind::Http));
+
+            let payload = requests[0].payload.as_object().expect("http payload object");
+            assert_eq!(
+                payload.get("method").and_then(serde_json::Value::as_str),
+                Some("POST")
+            );
+            assert_eq!(
+                payload.get("body_bytes").and_then(serde_json::Value::as_str),
+                Some("AAEC/w==")
+            );
+            assert!(
+                payload.get("body").is_none(),
+                "binary fetch bodies must use body_bytes instead of text coercion: {payload:?}"
+            );
         });
     }
 

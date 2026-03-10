@@ -640,6 +640,7 @@ fn extract_string_list(value: &Value) -> Vec<String> {
 pub fn load_skills(options: LoadSkillsOptions) -> LoadSkillsResult {
     let mut skill_map: HashMap<String, Skill> = HashMap::new();
     let mut real_paths: HashSet<PathBuf> = HashSet::new();
+    let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
     let mut diagnostics = Vec::new();
     let mut collisions = Vec::new();
 
@@ -679,10 +680,11 @@ pub fn load_skills(options: LoadSkillsOptions) -> LoadSkillsResult {
 
     if options.include_defaults {
         merge_skills(
-            load_skills_from_dir(
+            load_skills_from_dir_with_visited(
                 options.cwd.join(Config::project_dir()).join("skills"),
                 "project".to_string(),
                 true,
+                &mut visited_dirs,
             ),
             &mut skill_map,
             &mut real_paths,
@@ -690,7 +692,12 @@ pub fn load_skills(options: LoadSkillsOptions) -> LoadSkillsResult {
             &mut collisions,
         );
         merge_skills(
-            load_skills_from_dir(options.agent_dir.join("skills"), "user".to_string(), true),
+            load_skills_from_dir_with_visited(
+                options.agent_dir.join("skills"),
+                "user".to_string(),
+                true,
+                &mut visited_dirs,
+            ),
             &mut skill_map,
             &mut real_paths,
             &mut diagnostics,
@@ -726,7 +733,7 @@ pub fn load_skills(options: LoadSkillsOptions) -> LoadSkillsResult {
         match fs::metadata(&resolved) {
             Ok(meta) if meta.is_dir() => {
                 merge_skills(
-                    load_skills_from_dir(resolved, source, true),
+                    load_skills_from_dir_with_visited(resolved, source, true, &mut visited_dirs),
                     &mut skill_map,
                     &mut real_paths,
                     &mut diagnostics,
@@ -783,9 +790,18 @@ fn load_skills_from_dir(
     source: String,
     include_root_files: bool,
 ) -> LoadSkillsResult {
+    let mut visited_dirs = HashSet::new();
+    load_skills_from_dir_with_visited(dir, source, include_root_files, &mut visited_dirs)
+}
+
+fn load_skills_from_dir_with_visited(
+    dir: PathBuf,
+    source: String,
+    include_root_files: bool,
+    visited_dirs: &mut HashSet<PathBuf>,
+) -> LoadSkillsResult {
     let mut skills = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut visited_dirs = HashSet::new();
     let mut stack = vec![(dir, source, include_root_files)];
 
     while let Some((current_dir, current_source, current_include_root)) = stack.pop() {
@@ -3092,6 +3108,40 @@ still frontmatter",
         assert_eq!(result.skills.len(), 1);
         assert_eq!(result.skills[0].name, "my-skill");
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_skills_dedupes_diagnostics_across_alias_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_root = tmp.path().join("skills-real");
+        let alias_root = tmp.path().join("skills-alias");
+        let skill_dir = real_root.join("my-skill");
+        fs::create_dir_all(&skill_dir).expect("mkdir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: Alias diagnostic guard test\ninvalid-field: nope\n---\nBody",
+        )
+        .expect("write skill");
+
+        std::os::unix::fs::symlink(&real_root, &alias_root).expect("create alias root");
+
+        let result = load_skills(LoadSkillsOptions {
+            cwd: tmp.path().to_path_buf(),
+            agent_dir: tmp.path().join("agent"),
+            skill_paths: vec![real_root, alias_root],
+            include_defaults: false,
+        });
+
+        assert_eq!(result.skills.len(), 1);
+        assert_eq!(result.skills[0].name, "my-skill");
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].path, skill_dir.join("SKILL.md"));
+        assert!(
+            result.diagnostics[0]
+                .message
+                .contains("unknown frontmatter field")
+        );
     }
 
     #[test]

@@ -1893,9 +1893,11 @@ pub(crate) async fn run_bash_command(
     let mut bash_output = BashOutputState::new(max_chunks_bytes);
     bash_output.timeout_ms = timeout_secs.map(|s| s.saturating_mul(1000));
 
+    let cx = AgentCx::for_current_or_request();
     let mut timed_out = false;
+    let mut cancelled = false;
     let mut exit_code: Option<i32> = None;
-    let start = AgentCx::for_current_or_request()
+    let start = cx
         .cx()
         .timer_driver()
         .map_or_else(wall_now, |timer| timer.now());
@@ -1923,7 +1925,7 @@ pub(crate) async fn run_bash_command(
             Err(err) => return Err(Error::tool("bash", err.to_string())),
         }
 
-        let now = AgentCx::for_current_or_request()
+        let now = cx
             .cx()
             .timer_driver()
             .map_or_else(wall_now, |timer| timer.now());
@@ -1948,10 +1950,19 @@ pub(crate) async fn run_bash_command(
             }
         }
 
+        if terminate_deadline.is_none() && cx.checkpoint().is_err() {
+            cancelled = true;
+            exit_code = guard
+                .kill()
+                .map_err(|err| Error::tool("bash", format!("Failed to kill process: {err}")))?
+                .map(exit_status_code);
+            break;
+        }
+
         sleep(now, tick).await;
     }
 
-    let now_drain = AgentCx::for_current_or_request()
+    let now_drain = cx
         .cx()
         .timer_driver()
         .map_or_else(wall_now, |timer| timer.now());
@@ -1960,11 +1971,15 @@ pub(crate) async fn run_bash_command(
         match rx.try_recv() {
             Ok(chunk) => ingest_bash_chunk(chunk, &mut bash_output).await?,
             Err(mpsc::TryRecvError::Empty) => {
-                let now = AgentCx::for_current_or_request()
+                let now = cx
                     .cx()
                     .timer_driver()
                     .map_or_else(wall_now, |timer| timer.now());
                 if now >= drain_deadline {
+                    break;
+                }
+                if cx.checkpoint().is_err() {
+                    cancelled = true;
                     break;
                 }
                 sleep(now, tick).await;
@@ -2034,7 +2049,6 @@ pub(crate) async fn run_bash_command(
         }
     }
 
-    let mut cancelled = false;
     if timed_out {
         cancelled = true;
         if !output_text.is_empty() {
@@ -6520,6 +6534,48 @@ mod tests {
             assert!(
                 !marker.exists(),
                 "background child was not terminated on timeout"
+            );
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_bash_cancelled_context_kills_process_tree() {
+        asupersync::test_utils::run_test(|| async {
+            let tmp = tempfile::tempdir().unwrap();
+            let marker = tmp.path().join("leaked_child.txt");
+
+            let ambient_cx = asupersync::Cx::for_testing();
+            let cancel_cx = ambient_cx.clone();
+            let _current = asupersync::Cx::set_current(Some(ambient_cx));
+
+            let cancel_thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel_cx.set_cancel_requested(true);
+            });
+
+            let result = run_bash_command(
+                tmp.path(),
+                None,
+                None,
+                "(sleep 3; echo leaked > leaked_child.txt) & sleep 10",
+                Some(30),
+                None,
+            )
+            .await
+            .expect("cancelled bash should return a result");
+
+            cancel_thread.join().expect("cancel thread");
+
+            assert!(
+                result.cancelled,
+                "expected cancelled bash result: {result:?}"
+            );
+
+            std::thread::sleep(Duration::from_secs(4));
+            assert!(
+                !marker.exists(),
+                "background child was not terminated on cancellation"
             );
         });
     }
