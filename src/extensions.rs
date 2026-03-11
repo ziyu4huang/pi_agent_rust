@@ -535,14 +535,14 @@ impl CompatibilityScanner {
 
     pub fn scan_path(&self, path: &Path) -> Result<CompatLedger> {
         let files = collect_js_like_files(path)?;
-        Ok(self.scan_files(&files))
+        self.scan_files(&files)
     }
 
     pub fn scan_root(&self) -> Result<CompatLedger> {
         self.scan_path(&self.root)
     }
 
-    fn scan_files(&self, files: &[PathBuf]) -> CompatLedger {
+    fn scan_files(&self, files: &[PathBuf]) -> Result<CompatLedger> {
         let mut caps: BTreeMap<(String, String, String), Vec<CompatEvidence>> = BTreeMap::new();
         let mut rewrites: BTreeMap<(String, String), Vec<CompatEvidence>> = BTreeMap::new();
         let mut forbidden: BTreeMap<(String, String, String), Vec<CompatEvidence>> =
@@ -550,7 +550,7 @@ impl CompatibilityScanner {
         let mut flagged: BTreeMap<(String, String, String), Vec<CompatEvidence>> = BTreeMap::new();
 
         for path in files {
-            self.scan_file(path, &mut caps, &mut rewrites, &mut forbidden, &mut flagged);
+            self.scan_file(path, &mut caps, &mut rewrites, &mut forbidden, &mut flagged)?;
         }
 
         let capabilities = caps
@@ -612,13 +612,13 @@ impl CompatibilityScanner {
             })
             .collect();
 
-        CompatLedger {
+        Ok(CompatLedger {
             schema: COMPAT_LEDGER_SCHEMA_VERSION.to_string(),
             capabilities,
             rewrites,
             forbidden,
             flagged,
-        }
+        })
     }
 
     fn scan_file(
@@ -628,12 +628,15 @@ impl CompatibilityScanner {
         rewrites: &mut BTreeMap<(String, String), Vec<CompatEvidence>>,
         forbidden: &mut BTreeMap<(String, String, String), Vec<CompatEvidence>>,
         flagged: &mut BTreeMap<(String, String, String), Vec<CompatEvidence>>,
-    ) {
+    ) -> Result<()> {
         const LONG_LINE_COMMENT_BYPASS_LEN: usize = 4096;
 
-        let Ok(content) = fs::read_to_string(path) else {
-            return;
-        };
+        let content = fs::read_to_string(path).map_err(|err| {
+            Error::extension(format!(
+                "Failed to read extension source file {}: {err}",
+                path.display()
+            ))
+        })?;
 
         let rel = relative_posix(&self.root, path);
         let mut state = ScannerState {
@@ -694,6 +697,8 @@ impl CompatibilityScanner {
                 Self::scan_forbidden_patterns_in_line(&rel, line_no, scan_text, forbidden);
             }
         }
+
+        Ok(())
     }
 
     #[must_use]
@@ -1785,6 +1790,31 @@ pi.exec("echo hello");
         let err_text = err.to_string();
         assert!(err_text.contains("Failed to read extension source directory"));
         assert!(err_text.contains(&blocked_dir.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compatibility_scanner_scan_path_fails_on_unreadable_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let clean = temp.path().join("clean.js");
+        fs::write(&clean, "export default {};\n").expect("write clean file");
+
+        let blocked = temp.path().join("blocked.js");
+        fs::write(&blocked, "import fs from 'fs';\n").expect("write blocked file");
+        fs::set_permissions(&blocked, PermissionsExt::from_mode(0o000))
+            .expect("chmod blocked file");
+
+        let scanner = CompatibilityScanner::new(temp.path().to_path_buf());
+        let err = scanner
+            .scan_path(temp.path())
+            .expect_err("scan should fail closed");
+
+        fs::set_permissions(&blocked, PermissionsExt::from_mode(0o644))
+            .expect("restore blocked file perms");
+
+        let err_text = err.to_string();
+        assert!(err_text.contains("Failed to read extension source file"));
+        assert!(err_text.contains(&blocked.display().to_string()));
     }
 
     #[test]
