@@ -1884,7 +1884,7 @@ pub(crate) async fn run_bash_command(
     // Wrap in ProcessGuard for cleanup (including tree kill)
     let mut guard = ProcessGuard::new(child, ProcessCleanupMode::ProcessGroupTree);
 
-    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(128);
+    let (tx, mut rx) = mpsc::sync_channel::<Vec<u8>>(128);
     let tx_stdout = tx.clone();
     thread::spawn(move || pump_stream(stdout, &tx_stdout));
     thread::spawn(move || pump_stream(stderr, &tx));
@@ -1967,26 +1967,16 @@ pub(crate) async fn run_bash_command(
         .timer_driver()
         .map_or_else(wall_now, |timer| timer.now());
     let drain_deadline = now_drain + Duration::from_secs(2);
-    loop {
-        match rx.try_recv() {
-            Ok(chunk) => ingest_bash_chunk(chunk, &mut bash_output).await?,
-            Err(mpsc::TryRecvError::Empty) => {
-                let now = cx
-                    .cx()
-                    .timer_driver()
-                    .map_or_else(wall_now, |timer| timer.now());
-                if now >= drain_deadline {
-                    break;
-                }
-                if cx.checkpoint().is_err() {
-                    cancelled = true;
-                    break;
-                }
-                sleep(now, tick).await;
-            }
-            Err(mpsc::TryRecvError::Disconnected) => break,
-        }
-    }
+    let allow_drain_cancellation = !cancelled && !timed_out && exit_code.is_none();
+    cancelled |= drain_bash_output(
+        &mut rx,
+        &mut bash_output,
+        &cx,
+        drain_deadline,
+        tick,
+        allow_drain_cancellation,
+    )
+    .await?;
 
     drop(bash_output.temp_file.take());
 
@@ -4352,6 +4342,35 @@ fn pump_stream<R: Read + Send + 'static>(mut reader: R, tx: &mpsc::SyncSender<Ve
     }
 }
 
+async fn drain_bash_output(
+    rx: &mut mpsc::Receiver<Vec<u8>>,
+    bash_output: &mut BashOutputState,
+    cx: &AgentCx,
+    drain_deadline: asupersync::Time,
+    tick: Duration,
+    allow_cancellation: bool,
+) -> Result<bool> {
+    loop {
+        match rx.try_recv() {
+            Ok(chunk) => ingest_bash_chunk(chunk, bash_output).await?,
+            Err(mpsc::TryRecvError::Empty) => {
+                let now = cx
+                    .cx()
+                    .timer_driver()
+                    .map_or_else(wall_now, |timer| timer.now());
+                if now >= drain_deadline {
+                    return Ok(false);
+                }
+                if allow_cancellation && cx.checkpoint().is_err() {
+                    return Ok(true);
+                }
+                sleep(now, tick).await;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(false),
+        }
+    }
+}
+
 fn concat_chunks(chunks: &VecDeque<Vec<u8>>) -> Vec<u8> {
     let total: usize = chunks.iter().map(Vec::len).sum();
     let mut out = Vec::with_capacity(total);
@@ -6577,6 +6596,76 @@ mod tests {
                 !marker.exists(),
                 "background child was not terminated on cancellation"
             );
+        });
+    }
+
+    #[test]
+    fn test_drain_bash_output_ignores_cancellation_after_process_exit() {
+        asupersync::test_utils::run_test(|| async {
+            let (tx, mut rx) = mpsc::sync_channel::<Vec<u8>>(1);
+            let mut bash_output = BashOutputState::new(DEFAULT_MAX_BYTES);
+
+            let ambient_cx = asupersync::Cx::for_testing();
+            ambient_cx.set_cancel_requested(true);
+            let _current = asupersync::Cx::set_current(Some(ambient_cx));
+            let cx = AgentCx::for_current_or_request();
+            let now = cx
+                .cx()
+                .timer_driver()
+                .map_or_else(wall_now, |timer| timer.now());
+
+            let cancelled = drain_bash_output(
+                &mut rx,
+                &mut bash_output,
+                &cx,
+                now + std::time::Duration::from_millis(10),
+                std::time::Duration::from_millis(1),
+                false,
+            )
+            .await
+            .expect("drain should complete without cancellation");
+
+            drop(tx);
+
+            assert!(
+                !cancelled,
+                "post-exit drain should ignore late ambient cancellation"
+            );
+            assert_eq!(bash_output.total_bytes, 0);
+        });
+    }
+
+    #[test]
+    fn test_drain_bash_output_honors_cancellation_while_process_still_active() {
+        asupersync::test_utils::run_test(|| async {
+            let (_tx, mut rx) = mpsc::sync_channel::<Vec<u8>>(1);
+            let mut bash_output = BashOutputState::new(DEFAULT_MAX_BYTES);
+
+            let ambient_cx = asupersync::Cx::for_testing();
+            ambient_cx.set_cancel_requested(true);
+            let _current = asupersync::Cx::set_current(Some(ambient_cx));
+            let cx = AgentCx::for_current_or_request();
+            let now = cx
+                .cx()
+                .timer_driver()
+                .map_or_else(wall_now, |timer| timer.now());
+
+            let cancelled = drain_bash_output(
+                &mut rx,
+                &mut bash_output,
+                &cx,
+                now + std::time::Duration::from_secs(1),
+                std::time::Duration::from_millis(1),
+                true,
+            )
+            .await
+            .expect("drain should complete under cancellation");
+
+            assert!(
+                cancelled,
+                "active drain should still honor ambient cancellation"
+            );
+            assert_eq!(bash_output.total_bytes, 0);
         });
     }
 
