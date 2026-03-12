@@ -1048,8 +1048,9 @@ impl PiApp {
             let mut session_guard = match session.lock(&task_cx).await {
                 Ok(guard) => guard,
                 Err(err) => {
-                    let _ = crate::interactive::enqueue_pi_event_current(
+                    let _ = crate::interactive::enqueue_pi_event(
                         &event_tx,
+                        &Cx::for_request(),
                         PiMsg::AgentError(format!("Failed to lock session: {err}")),
                     )
                     .await;
@@ -1058,8 +1059,9 @@ impl PiApp {
             };
 
             if let Err(err) = session_guard.save().await {
-                let _ = crate::interactive::enqueue_pi_event_current(
+                let _ = crate::interactive::enqueue_pi_event(
                     &event_tx,
+                    &Cx::for_request(),
                     PiMsg::AgentError(format!("Failed to save session: {err}")),
                 )
                 .await;
@@ -1472,8 +1474,9 @@ impl PiApp {
                 let mut session_guard = match session.lock(&task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock session: {err}")),
                         )
                         .await;
@@ -1503,8 +1506,9 @@ impl PiApp {
                 let session_guard = match session.lock(&task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock session: {err}")),
                         )
                         .await;

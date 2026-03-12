@@ -1233,8 +1233,9 @@ impl PiApp {
                 match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock agent: {err}")),
                         )
                         .await;
@@ -1279,8 +1280,9 @@ impl PiApp {
                 {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock session: {err}")),
                         )
                         .await;
@@ -1423,8 +1425,9 @@ impl PiApp {
                 match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock agent: {err}")),
                         )
                         .await;
@@ -1469,8 +1472,9 @@ impl PiApp {
                 {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock session: {err}")),
                         )
                         .await;
@@ -1687,8 +1691,9 @@ impl PiApp {
                 match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock agent: {err}")),
                         )
                         .await;
@@ -1757,8 +1762,9 @@ impl PiApp {
                 {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event_current(
+                        let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
+                            &Cx::for_request(),
                             PiMsg::AgentError(format!("Failed to lock session: {err}")),
                         )
                         .await;
