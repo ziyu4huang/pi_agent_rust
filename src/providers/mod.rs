@@ -2293,6 +2293,14 @@ export default function init(pi) {
         );
     }
 
+    #[test]
+    fn normalize_anthropic_base_handles_opaque_url_fallback() {
+        assert_eq!(
+            normalize_anthropic_base("data:text/plain,hello"),
+            "data:text/plain,hello/v1/messages"
+        );
+    }
+
     // ── normalize_openai_base ───────────────────────────────────────
 
     #[test]
@@ -2372,6 +2380,14 @@ export default function init(pi) {
         assert_eq!(
             normalize_openai_base(""),
             "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalize_openai_base_handles_opaque_url_fallback() {
+        assert_eq!(
+            normalize_openai_base("data:text/plain,hello"),
+            "data:text/plain,hello/chat/completions"
         );
     }
 
@@ -2465,6 +2481,14 @@ export default function init(pi) {
         );
     }
 
+    #[test]
+    fn normalize_responses_base_handles_opaque_url_fallback() {
+        assert_eq!(
+            normalize_openai_responses_base("data:text/plain,hello"),
+            "data:text/plain,hello/responses"
+        );
+    }
+
     // ── normalize_openai_codex_responses_base ──────────────────────
 
     #[test]
@@ -2498,6 +2522,14 @@ export default function init(pi) {
         assert_eq!(
             normalize_openai_codex_responses_base("https://chatgpt.com/backend-api?via=proxy#frag"),
             "https://chatgpt.com/backend-api/codex/responses?via=proxy#frag"
+        );
+    }
+
+    #[test]
+    fn normalize_codex_responses_base_handles_opaque_url_fallback() {
+        assert_eq!(
+            normalize_openai_codex_responses_base("data:text/plain,hello"),
+            "data:text/plain,hello/backend-api/codex/responses"
         );
     }
 
@@ -2570,6 +2602,14 @@ export default function init(pi) {
     #[test]
     fn normalize_cohere_base_empty_uses_default() {
         assert_eq!(normalize_cohere_base(""), "https://api.cohere.com/v2/chat");
+    }
+
+    #[test]
+    fn normalize_cohere_base_handles_opaque_url_fallback() {
+        assert_eq!(
+            normalize_cohere_base("data:text/plain,hello"),
+            "data:text/plain,hello/chat"
+        );
     }
 
     mod proptests {
