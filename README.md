@@ -2226,7 +2226,7 @@ A: Yes. Point any provider at a custom base URL via `models.json`. Pi normalizes
 | **Startup** | <100ms | ~1s | ~2s | ~5s |
 | **Memory** | <50MB | ~200MB | ~150MB | ~500MB |
 | **Providers** | Anthropic + OpenAI/Responses + Gemini/Cohere + Azure/Bedrock/Vertex + Copilot/GitLab + OpenAI-compatible presets | Anthropic | Many | Many |
-| **Tools** | 7 built-in | Many | File-focused | IDE-integrated |
+| **Tools** | 8 built-in | Many | File-focused | IDE-integrated |
 | **Sessions** | JSONL tree | Proprietary | Git-based | Proprietary |
 | **Open source** | Yes | Yes | Yes | No |
 

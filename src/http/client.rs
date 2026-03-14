@@ -697,10 +697,13 @@ fn body_kind_from_headers(headers: &[(String, String)]) -> Result<BodyKind> {
         let Some(last) = transfer_encodings.last() else {
             return Err(Error::api("Invalid HTTP Transfer-Encoding header"));
         };
-        if last == "chunked" {
-            return Ok(BodyKind::Chunked);
+        if last != "chunked" {
+            return Err(Error::api("Unsupported HTTP Transfer-Encoding header"));
         }
-        return Err(Error::api("Unsupported HTTP Transfer-Encoding header"));
+        if transfer_encodings.len() != 1 {
+            return Err(Error::api("Unsupported HTTP Transfer-Encoding header"));
+        }
+        return Ok(BodyKind::Chunked);
     }
 
     Ok(match content_length {
@@ -1209,25 +1212,27 @@ mod tests {
     }
 
     #[test]
-    fn body_kind_chunked_mixed() {
-        // Transfer-Encoding with multiple values
+    fn body_kind_rejects_chunked_with_additional_transfer_codings() {
         let headers = vec![("Transfer-Encoding".to_string(), "gzip, chunked".to_string())];
-        assert!(matches!(
-            body_kind_from_headers(&headers).unwrap(),
-            BodyKind::Chunked
-        ));
+        assert!(body_kind_from_headers(&headers).is_err());
     }
 
     #[test]
-    fn body_kind_repeated_transfer_encoding_headers_are_aggregated() {
+    fn body_kind_rejects_repeated_transfer_encoding_headers_with_extra_codings() {
         let headers = vec![
             ("Transfer-Encoding".to_string(), "gzip".to_string()),
             ("Transfer-Encoding".to_string(), "chunked".to_string()),
         ];
-        assert!(matches!(
-            body_kind_from_headers(&headers).unwrap(),
-            BodyKind::Chunked
-        ));
+        assert!(body_kind_from_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn body_kind_rejects_repeated_chunked_transfer_encoding() {
+        let headers = vec![
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+        ];
+        assert!(body_kind_from_headers(&headers).is_err());
     }
 
     #[test]
