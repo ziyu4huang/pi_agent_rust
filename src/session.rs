@@ -2741,20 +2741,30 @@ struct SessionPickEntry {
 }
 
 impl SessionPickEntry {
-    fn from_meta(meta: crate::session_index::SessionMeta) -> Option<Self> {
-        let path = PathBuf::from(meta.path);
-        if !path.exists() {
-            return None;
-        }
-        Some(Self {
-            path,
+    fn from_meta(meta: crate::session_index::SessionMeta) -> Self {
+        Self {
+            path: PathBuf::from(meta.path),
             id: meta.id,
             timestamp: meta.timestamp,
             message_count: meta.message_count,
             name: meta.name,
             last_modified_ms: meta.last_modified_ms,
             size_bytes: meta.size_bytes,
-        })
+        }
+    }
+}
+
+fn indexed_session_path_is_missing(path: &Path) -> bool {
+    match path.try_exists() {
+        Ok(exists) => !exists,
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "Failed to determine whether indexed session path exists; deferring prune"
+            );
+            false
+        }
     }
 }
 
@@ -2766,14 +2776,12 @@ fn split_indexed_session_entries(
 
     for meta in metas {
         let path = PathBuf::from(&meta.path);
-        if !path.exists() {
+        if indexed_session_path_is_missing(&path) {
             missing_paths.push(path);
             continue;
         }
 
-        if let Some(entry) = SessionPickEntry::from_meta(meta) {
-            entries.push(entry);
-        }
+        entries.push(SessionPickEntry::from_meta(meta));
     }
 
     (entries, missing_paths)
@@ -7195,6 +7203,54 @@ mod tests {
             !still_indexed,
             "missing session should be pruned from the recent-session index"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_indexed_session_entries_keeps_permission_denied_path_out_of_missing_bucket() {
+        use crate::session_index::SessionMeta;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let guarded_dir = temp.path().join("guarded");
+        std::fs::create_dir(&guarded_dir).expect("create guarded dir");
+        let session_path = guarded_dir.join("session.jsonl");
+        std::fs::write(&session_path, b"{\"version\":\"3\"}\n").expect("write session file");
+
+        let original_mode = std::fs::metadata(&guarded_dir)
+            .expect("guarded dir metadata")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&guarded_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod guarded dir");
+
+        assert!(
+            session_path.try_exists().is_err(),
+            "expected permission-denied path probe for inaccessible parent directory"
+        );
+
+        let meta = SessionMeta {
+            path: session_path.display().to_string(),
+            id: "session-id".to_string(),
+            cwd: temp.path().display().to_string(),
+            timestamp: "2026-03-15T00:00:00.000Z".to_string(),
+            message_count: 1,
+            last_modified_ms: 0,
+            size_bytes: 16,
+            name: Some("guarded".to_string()),
+        };
+
+        let (entries, missing_paths) = split_indexed_session_entries(vec![meta]);
+
+        std::fs::set_permissions(&guarded_dir, std::fs::Permissions::from_mode(original_mode))
+            .expect("restore guarded dir permissions");
+
+        assert!(
+            missing_paths.is_empty(),
+            "permission errors must not be classified as missing indexed sessions"
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, session_path);
     }
 
     #[cfg(unix)]

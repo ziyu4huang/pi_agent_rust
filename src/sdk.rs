@@ -407,6 +407,7 @@ pub struct RpcModelInfo {
 /// Session state payload returned by RPC `get_state`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RpcSessionState {
     #[serde(default)]
     pub model: Option<RpcModelInfo>,

@@ -1938,10 +1938,9 @@ impl PackageManager {
         metadata: &PathMetadata,
     ) -> Result<()> {
         if let Some(manifest) = read_pi_manifest(package_root)? {
-            let entries = manifest.entries_for(resource_type);
-            if entries.as_ref().is_some_and(|e| !e.is_empty()) {
+            if let Some(entries) = manifest.entries_for(resource_type) {
                 Self::add_manifest_entries(
-                    entries.as_deref(),
+                    Some(&entries),
                     package_root,
                     resource_type,
                     target,
@@ -1990,28 +1989,28 @@ impl PackageManager {
         resource_type: ResourceType,
     ) -> Result<(Vec<PathBuf>, std::collections::HashSet<PathBuf>)> {
         if let Some(manifest) = read_pi_manifest(package_root)? {
-            let entries = manifest.entries_for(resource_type);
-            if let Some(entries) = entries {
-                if !entries.is_empty() {
-                    let all_files =
-                        collect_files_from_manifest_entries(&entries, package_root, resource_type);
-                    let patterns = entries
-                        .iter()
-                        .filter(|e| is_pattern(e))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let enabled_by_manifest = if patterns.is_empty() {
-                        all_files
-                            .iter()
-                            .cloned()
-                            .collect::<std::collections::HashSet<_>>()
-                    } else {
-                        apply_patterns(&all_files, &patterns, package_root)
-                    };
-                    let mut enabled_vec = enabled_by_manifest.iter().cloned().collect::<Vec<_>>();
-                    enabled_vec.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-                    return Ok((enabled_vec, enabled_by_manifest));
+            if let Some(entries) = manifest.entries_for(resource_type) {
+                if entries.is_empty() {
+                    return Ok((Vec::new(), std::collections::HashSet::new()));
                 }
+                let all_files =
+                    collect_files_from_manifest_entries(&entries, package_root, resource_type);
+                let patterns = entries
+                    .iter()
+                    .filter(|e| is_pattern(e))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let enabled_by_manifest = if patterns.is_empty() {
+                    all_files
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>()
+                } else {
+                    apply_patterns(&all_files, &patterns, package_root)
+                };
+                let mut enabled_vec = enabled_by_manifest.iter().cloned().collect::<Vec<_>>();
+                enabled_vec.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+                return Ok((enabled_vec, enabled_by_manifest));
             }
         }
 
@@ -2684,9 +2683,7 @@ fn resolve_extension_entries(dir: &Path) -> Option<Vec<PathBuf>> {
                         }
                         entries.push(resolved);
                     }
-                    if !entries.is_empty() {
-                        return Some(entries);
-                    }
+                    return Some(entries);
                 }
             }
             Ok(None) => {}
@@ -5813,11 +5810,129 @@ mod tests {
     }
 
     #[test]
+    fn resolve_extension_entries_empty_manifest_extensions_fail_closed_without_index_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("ext");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        fs::write(
+            ext_dir.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "test-pkg",
+                "pi": {
+                    "extensions": []
+                }
+            }))
+            .expect("serialize package.json"),
+        )
+        .expect("write package.json");
+        fs::write(ext_dir.join("index.ts"), "export default {}").expect("write index.ts");
+
+        let entries = resolve_extension_entries(&ext_dir).expect("entries");
+        assert!(
+            entries.is_empty(),
+            "explicit empty package.json#pi.extensions must not fall back to index.*"
+        );
+    }
+
+    #[test]
+    fn resolve_extension_entries_missing_manifest_targets_fail_closed_without_index_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("ext");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        fs::write(
+            ext_dir.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "test-pkg",
+                "pi": {
+                    "extensions": ["extensions/missing.js"]
+                }
+            }))
+            .expect("serialize package.json"),
+        )
+        .expect("write package.json");
+        fs::write(ext_dir.join("index.ts"), "export default {}").expect("write index.ts");
+
+        let entries = resolve_extension_entries(&ext_dir).expect("entries");
+        assert!(
+            entries.is_empty(),
+            "missing package.json#pi.extensions targets must not fall back to index.*"
+        );
+    }
+
+    #[test]
     fn resolve_extension_entries_empty_dir_returns_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ext_dir = dir.path().join("ext");
         fs::create_dir_all(&ext_dir).expect("create dir");
         assert!(resolve_extension_entries(&ext_dir).is_none());
+    }
+
+    #[test]
+    fn collect_default_resources_respects_empty_manifest_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package_root = dir.path().join("pkg");
+        let skills_dir = package_root.join("skills").join("my-skill");
+        fs::create_dir_all(&skills_dir).expect("create skills dir");
+        fs::write(skills_dir.join("SKILL.md"), "# Skill").expect("write skill");
+        fs::write(
+            package_root.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "pkg",
+                "pi": {
+                    "skills": []
+                }
+            }))
+            .expect("serialize package.json"),
+        )
+        .expect("write package.json");
+
+        let mut target = ResourceList::default();
+        let metadata = PathMetadata {
+            source: package_root.display().to_string(),
+            scope: PackageScope::Project,
+            origin: ResourceOrigin::Package,
+            base_dir: Some(package_root.clone()),
+        };
+
+        PackageManager::collect_default_resources(
+            &package_root,
+            ResourceType::Skills,
+            &mut target,
+            &metadata,
+        )
+        .expect("collect default resources");
+
+        assert!(
+            target.items.is_empty(),
+            "explicit empty package.json#pi.skills must disable convention fallback"
+        );
+    }
+
+    #[test]
+    fn collect_manifest_files_respects_empty_manifest_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package_root = dir.path().join("pkg");
+        let extensions_dir = package_root.join("extensions");
+        fs::create_dir_all(&extensions_dir).expect("create extensions dir");
+        fs::write(extensions_dir.join("index.ts"), "export default {}").expect("write index.ts");
+        fs::write(
+            package_root.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "pkg",
+                "pi": {
+                    "extensions": []
+                }
+            }))
+            .expect("serialize package.json"),
+        )
+        .expect("write package.json");
+
+        let (all_files, enabled) =
+            PackageManager::collect_manifest_files(&package_root, ResourceType::Extensions)
+                .expect("collect manifest files");
+
+        assert!(all_files.is_empty());
+        assert!(enabled.is_empty());
     }
 
     // ======================================================================
