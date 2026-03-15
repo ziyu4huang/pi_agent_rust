@@ -357,19 +357,25 @@ pub(crate) fn enqueue_session_index_snapshot_update(
     message_count: u64,
     name: Option<String>,
 ) {
-    if let Err(err) = SessionIndex::for_sessions_root(sessions_root).index_session_snapshot(
-        path,
-        header,
-        message_count,
-        name,
-    ) {
-        tracing::warn!(
-            sessions_root = %sessions_root.display(),
-            path = %path.display(),
-            error = %err,
-            "Failed to update session index snapshot"
-        );
-    }
+    let sessions_root = sessions_root.to_path_buf();
+    let path = path.to_path_buf();
+    let header = header.clone();
+    
+    std::thread::spawn(move || {
+        if let Err(err) = SessionIndex::for_sessions_root(&sessions_root).index_session_snapshot(
+            &path,
+            &header,
+            message_count,
+            name,
+        ) {
+            tracing::warn!(
+                sessions_root = %sessions_root.display(),
+                path = %path.display(),
+                error = %err,
+                "Failed to update session index snapshot"
+            );
+        }
+    });
 }
 
 fn init_schema(conn: &SqliteConnection) -> Result<()> {

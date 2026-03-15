@@ -515,6 +515,40 @@ impl PiApp {
                     return Some(Cmd::new(|| Message::new(PiMsg::RunPending)));
                 }
             }
+            PiMsg::OAuthDeviceFlowStarted {
+                provider,
+                device_code,
+                user_code,
+                verification_uri,
+                expires_in,
+            } => {
+                let message = format!(
+                    "OAuth login: {provider}\n\n\
+Open this URL:\n{verification_uri}\n\n\
+If prompted, enter this code: {user_code}\n\
+Code expires in {expires_in} seconds.\n\n\
+After approving access in the browser, press Enter in Pi to complete login."
+                );
+                self.messages.push(ConversationMessage {
+                    role: MessageRole::System,
+                    content: message,
+                    thinking: None,
+                    collapsed: false,
+                });
+                self.scroll_to_bottom();
+                self.pending_oauth = Some(PendingOAuth {
+                    provider,
+                    kind: PendingLoginKind::DeviceFlow,
+                    verifier: String::new(),
+                    oauth_config: None,
+                    device_code: Some(device_code),
+                    redirect_uri: None,
+                });
+                self.input_mode = InputMode::SingleLine;
+                self.set_input_height(3);
+                self.input.focus();
+                self.status_message = None;
+            }
             PiMsg::ConversationReset {
                 messages,
                 usage,

@@ -2754,7 +2754,7 @@ mod extensions_integration_tests {
     }
 
     #[test]
-    fn agent_session_enable_extensions_with_no_entries_is_noop() {
+    fn agent_session_enable_extensions_with_no_entries_clears_and_is_noop() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("runtime build");
@@ -2768,6 +2768,16 @@ mod extensions_integration_tests {
             let mut agent_session =
                 AgentSession::new(agent, session, false, ResolvedCompactionSettings::default());
 
+            // Manually inject a dummy extension state to verify clearing behavior.
+            let dummy_manager = ExtensionManager::new();
+            agent_session.extensions = Some(crate::extensions::ExtensionRegion::new(dummy_manager.clone()));
+            agent_session.agent.extensions = Some(dummy_manager.clone());
+            agent_session.extension_queue_modes = Some(Arc::new(std::sync::Mutex::new(ExtensionQueueModeState::new(
+                QueueMode::OneAtATime,
+                QueueMode::OneAtATime,
+            ))));
+            agent_session.extension_injected_queue = Some(Arc::new(std::sync::Mutex::new(ExtensionInjectedQueue::default())));
+
             agent_session
                 .enable_extensions(&[], temp_dir.path(), None, &[])
                 .await
@@ -2775,7 +2785,7 @@ mod extensions_integration_tests {
 
             assert!(
                 agent_session.extensions.is_none(),
-                "no extension region should be created for an empty extension list"
+                "no extension region should be created (and existing should be cleared) for an empty extension list"
             );
             assert!(
                 agent_session.agent.extensions.is_none(),
@@ -2783,11 +2793,11 @@ mod extensions_integration_tests {
             );
             assert!(
                 agent_session.extension_queue_modes.is_none(),
-                "empty extension list should not initialize queue mode mirrors"
+                "empty extension list should clear queue mode mirrors"
             );
             assert!(
                 agent_session.extension_injected_queue.is_none(),
-                "empty extension list should not initialize injected extension queues"
+                "empty extension list should clear injected extension queues"
             );
         });
     }
@@ -6034,11 +6044,19 @@ impl AgentSession {
 
         #[cfg(feature = "wasm-host")]
         if js_specs.is_empty() && native_specs.is_empty() && wasm_specs.is_empty() {
+            self.extensions = None;
+            self.agent.extensions = None;
+            self.extension_queue_modes = None;
+            self.extension_injected_queue = None;
             return Ok(());
         }
 
         #[cfg(not(feature = "wasm-host"))]
         if js_specs.is_empty() && native_specs.is_empty() {
+            self.extensions = None;
+            self.agent.extensions = None;
+            self.extension_queue_modes = None;
+            self.extension_injected_queue = None;
             return Ok(());
         }
 

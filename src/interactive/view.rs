@@ -1395,18 +1395,7 @@ impl PiApp {
                     ThemePickerItem::BuiltIn(name) => {
                         (name.to_string(), format!("{name} (built-in)"))
                     }
-                    ThemePickerItem::File(path) => {
-                        // Load theme to get name, or fallback to file stem.
-                        // Performance note: repetitive load, but themes are small JSON files.
-                        let name = Theme::load(path).map_or_else(
-                            |_| {
-                                path.file_stem().map_or_else(
-                                    || "unknown".to_string(),
-                                    |s| s.to_string_lossy().to_string(),
-                                )
-                            },
-                            |t| t.name,
-                        );
+                    ThemePickerItem::File { name, .. } => {
                         (name.clone(), format!("{name} (custom)"))
                     }
                 };

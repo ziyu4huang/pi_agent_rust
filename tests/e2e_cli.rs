@@ -1129,6 +1129,76 @@ fn e2e_cli_config_show_lists_discovered_package_resources() {
 }
 
 #[test]
+fn e2e_cli_config_show_surfaces_invalid_package_settings() {
+    let harness = CliTestHarness::new("e2e_cli_config_show_surfaces_invalid_package_settings");
+    let project_settings = harness.harness.temp_dir().join(".pi").join("settings.json");
+    fs::create_dir_all(
+        project_settings
+            .parent()
+            .expect("project settings parent must exist"),
+    )
+    .expect("create project settings dir");
+    fs::write(&project_settings, "{ invalid json\n").expect("write malformed project settings");
+    harness
+        .harness
+        .record_artifact("config.invalid.project.settings.json", &project_settings);
+
+    let result = harness.run(&["config", "--show"]);
+
+    assert_eq!(
+        result.exit_code, 1,
+        "expected invalid package settings to fail config --show\nstdout:\n{}\nstderr:\n{}",
+        result.stdout, result.stderr
+    );
+    assert_contains(
+        &harness.harness,
+        &result.stderr,
+        "Invalid JSON in settings file",
+    );
+    assert_contains(
+        &harness.harness,
+        &result.stderr,
+        &project_settings.display().to_string(),
+    );
+}
+
+#[test]
+fn e2e_cli_config_without_tty_surfaces_invalid_package_settings() {
+    let harness =
+        CliTestHarness::new("e2e_cli_config_without_tty_surfaces_invalid_package_settings");
+    let project_settings = harness.harness.temp_dir().join(".pi").join("settings.json");
+    fs::create_dir_all(
+        project_settings
+            .parent()
+            .expect("project settings parent must exist"),
+    )
+    .expect("create project settings dir");
+    fs::write(&project_settings, "{ invalid json\n").expect("write malformed project settings");
+    harness.harness.record_artifact(
+        "config.invalid.project.settings.plain.json",
+        &project_settings,
+    );
+
+    let result = harness.run(&["config"]);
+
+    assert_eq!(
+        result.exit_code, 1,
+        "expected invalid package settings to fail plain config\nstdout:\n{}\nstderr:\n{}",
+        result.stdout, result.stderr
+    );
+    assert_contains(
+        &harness.harness,
+        &result.stderr,
+        "Invalid JSON in settings file",
+    );
+    assert_contains(
+        &harness.harness,
+        &result.stderr,
+        &project_settings.display().to_string(),
+    );
+}
+
+#[test]
 fn e2e_cli_export_html_creates_file_and_contains_metadata() {
     let harness = CliTestHarness::new("e2e_cli_export_html_creates_file_and_contains_metadata");
     let session_path = harness.harness.temp_path("session.jsonl");

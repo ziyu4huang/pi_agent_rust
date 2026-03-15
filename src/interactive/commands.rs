@@ -1851,45 +1851,39 @@ impl PiApp {
         }
 
         if provider == "kimi-for-coding" {
-            let device_start =
-                futures::executor::block_on(crate::auth::start_kimi_code_device_flow());
-            match device_start {
-                Ok(device) => {
-                    let verification_url = device
-                        .verification_uri_complete
-                        .clone()
-                        .unwrap_or_else(|| device.verification_uri.clone());
-                    let message = format!(
-                        "OAuth login: kimi-for-coding\n\n\
-Open this URL:\n{verification_url}\n\n\
-If prompted, enter this code: {}\n\
-Code expires in {} seconds.\n\n\
-After approving access in the browser, press Enter in Pi to complete login.",
-                        device.user_code, device.expires_in
-                    );
-                    self.messages.push(ConversationMessage {
-                        role: MessageRole::System,
-                        content: message,
-                        thinking: None,
-                        collapsed: false,
-                    });
-                    self.scroll_to_bottom();
-                    self.pending_oauth = Some(PendingOAuth {
-                        provider,
-                        kind: PendingLoginKind::DeviceFlow,
-                        verifier: String::new(),
-                        oauth_config: None,
-                        device_code: Some(device.device_code),
-                        redirect_uri: None,
-                    });
-                    self.input_mode = InputMode::SingleLine;
-                    self.set_input_height(3);
-                    self.input.focus();
+            self.status_message = Some("Starting Kimi Code login...".to_string());
+            let event_tx = self.event_tx.clone();
+            let provider_clone = provider;
+            let runtime_handle = self.runtime_handle.clone();
+            let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request);
+
+            runtime_handle.spawn(async move {
+                let _current = asupersync::Cx::set_current(Some(cx));
+                match crate::auth::start_kimi_code_device_flow().await {
+                    Ok(device) => {
+                        let _ = crate::interactive::enqueue_pi_event_current(
+                            &event_tx,
+                            PiMsg::OAuthDeviceFlowStarted {
+                                provider: provider_clone,
+                                device_code: device.device_code,
+                                user_code: device.user_code,
+                                verification_uri: device
+                                    .verification_uri_complete
+                                    .unwrap_or(device.verification_uri),
+                                expires_in: device.expires_in,
+                            },
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        let _ = crate::interactive::enqueue_pi_event_current(
+                            &event_tx,
+                            PiMsg::AgentError(format!("OAuth login failed: {err}")),
+                        )
+                        .await;
+                    }
                 }
-                Err(err) => {
-                    self.status_message = Some(format!("OAuth login failed: {err}"));
-                }
-            }
+            });
             return None;
         }
 

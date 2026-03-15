@@ -302,7 +302,7 @@ fn main_impl() -> Result<()> {
                 }
                 if !*paths && (*show || *json) {
                     let manager = PackageManager::new(cwd.clone());
-                    let entries = manager.list_packages_blocking().unwrap_or_default();
+                    let entries = manager.list_packages_blocking()?;
                     if entries.is_empty() {
                         if *show {
                             handle_config_show_fast(&cwd);
@@ -312,8 +312,8 @@ fn main_impl() -> Result<()> {
                             handle_config_json_fast(&cwd)?;
                             return Ok(());
                         }
-                    } else if let Ok(Some(packages)) =
-                        collect_config_packages_blocking(&manager, entries)
+                    } else if let Some(packages) =
+                        collect_config_packages_blocking(&manager, entries)?
                     {
                         let report = build_config_report(&cwd, &packages);
                         if *json {
@@ -2581,10 +2581,10 @@ fn collect_config_packages_from_entries(
     packages
 }
 
-async fn collect_config_packages(manager: &PackageManager) -> Vec<ConfigPackageState> {
-    let entries = manager.list_packages().await.unwrap_or_default();
+async fn collect_config_packages(manager: &PackageManager) -> Result<Vec<ConfigPackageState>> {
+    let entries = manager.list_packages().await?;
     if entries.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let resolved_paths = match manager.resolve().await {
@@ -2595,7 +2595,10 @@ async fn collect_config_packages(manager: &PackageManager) -> Vec<ConfigPackageS
         }
     };
 
-    collect_config_packages_from_entries(entries, resolved_paths)
+    Ok(collect_config_packages_from_entries(
+        entries,
+        resolved_paths,
+    ))
 }
 
 fn collect_config_packages_blocking(
@@ -2943,7 +2946,7 @@ async fn handle_config(
     let interactive_requested = !show && !paths;
     let need_packages = show || json_output || interactive_requested;
     let packages = if need_packages {
-        collect_config_packages(manager).await
+        collect_config_packages(manager).await?
     } else {
         Vec::new()
     };

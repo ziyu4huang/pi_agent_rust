@@ -411,7 +411,7 @@ pub(super) enum SettingsUiEntry {
 #[derive(Debug, Clone)]
 pub(super) enum ThemePickerItem {
     BuiltIn(&'static str),
-    File(PathBuf),
+    File { path: PathBuf, name: String },
 }
 
 #[derive(Debug)]
@@ -430,7 +430,18 @@ impl ThemePickerOverlay {
         items.extend(
             Theme::discover_themes(cwd)
                 .into_iter()
-                .map(ThemePickerItem::File),
+                .map(|path| {
+                    let name = Theme::load(&path).map_or_else(
+                        |_| {
+                            path.file_stem().map_or_else(
+                                || "unknown".to_string(),
+                                |s| s.to_string_lossy().to_string(),
+                            )
+                        },
+                        |t| t.name,
+                    );
+                    ThemePickerItem::File { path, name }
+                }),
         );
         Self {
             items,

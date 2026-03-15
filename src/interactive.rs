@@ -1769,6 +1769,14 @@ pub enum PiMsg {
         display: String,
         content_for_agent: Option<Vec<ContentBlock>>,
     },
+    /// Async OAuth device flow start
+    OAuthDeviceFlowStarted {
+        provider: String,
+        device_code: String,
+        user_code: String,
+        verification_uri: String,
+        expires_in: u64,
+    },
     /// Replace conversation state from session (compaction/fork).
     ConversationReset {
         messages: Vec<ConversationMessage>,
@@ -2499,7 +2507,7 @@ impl PiApp {
                                     "solarized" => Theme::solarized(),
                                     _ => Theme::dark(),
                                 }),
-                                ThemePickerItem::File(path) => Theme::load(path),
+                                ThemePickerItem::File { path, .. } => Theme::load(path),
                             };
 
                             match loaded {
