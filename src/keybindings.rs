@@ -75,6 +75,12 @@ pub enum KeyBindingsWarning {
     },
 }
 
+#[derive(Debug)]
+enum ParsedKeyOverride {
+    Replace(Vec<String>),
+    Unbind,
+}
+
 impl fmt::Display for KeyBindingsWarning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1120,6 +1126,60 @@ impl KeyBindings {
         Self::load_from_path_with_diagnostics(&path)
     }
 
+    fn parse_override_action(
+        action_str: String,
+        path: &Path,
+        warnings: &mut Vec<KeyBindingsWarning>,
+    ) -> Option<AppAction> {
+        match serde_json::from_value(serde_json::Value::String(action_str.clone())) {
+            Ok(action) => Some(action),
+            Err(_) => {
+                warnings.push(KeyBindingsWarning::UnknownAction {
+                    action: action_str,
+                    path: path.to_path_buf(),
+                });
+                None
+            }
+        }
+    }
+
+    fn parse_override_value(
+        action: AppAction,
+        value: serde_json::Value,
+        path: &Path,
+        warnings: &mut Vec<KeyBindingsWarning>,
+    ) -> Option<ParsedKeyOverride> {
+        match value {
+            serde_json::Value::String(s) => Some(ParsedKeyOverride::Replace(vec![s])),
+            serde_json::Value::Array(arr) => {
+                if arr.is_empty() {
+                    return Some(ParsedKeyOverride::Unbind);
+                }
+
+                let mut keys = Vec::new();
+                for (idx, value) in arr.into_iter().enumerate() {
+                    match value {
+                        serde_json::Value::String(s) => keys.push(s),
+                        _ => warnings.push(KeyBindingsWarning::InvalidKeyValue {
+                            action: action.to_string(),
+                            index: idx,
+                            path: path.to_path_buf(),
+                        }),
+                    }
+                }
+                Some(ParsedKeyOverride::Replace(keys))
+            }
+            _ => {
+                warnings.push(KeyBindingsWarning::InvalidKeyValue {
+                    action: action.to_string(),
+                    index: 0,
+                    path: path.to_path_buf(),
+                });
+                None
+            }
+        }
+    }
+
     /// Load keybindings from a specific path with full diagnostics.
     ///
     /// Returns defaults with warnings if:
@@ -1177,45 +1237,20 @@ impl KeyBindings {
 
         // Process each entry
         for (action_str, value) in raw {
-            // Try to parse action ID
-            let action: AppAction =
-                if let Ok(a) = serde_json::from_value(serde_json::json!(action_str)) {
-                    a
-                } else {
-                    warnings.push(KeyBindingsWarning::UnknownAction {
-                        action: action_str,
-                        path: path.to_path_buf(),
-                    });
-                    continue;
-                };
+            let Some(action) = Self::parse_override_action(action_str, path, &mut warnings) else {
+                continue;
+            };
+            let Some(key_override) = Self::parse_override_value(action, value, path, &mut warnings)
+            else {
+                continue;
+            };
 
-            // Parse key bindings (can be string or array of strings)
-            let key_strings: Vec<String> = match value {
-                serde_json::Value::String(s) => vec![s],
-                serde_json::Value::Array(arr) => {
-                    let mut keys = Vec::new();
-                    for (idx, v) in arr.into_iter().enumerate() {
-                        match v {
-                            serde_json::Value::String(s) => keys.push(s),
-                            _ => {
-                                warnings.push(KeyBindingsWarning::InvalidKeyValue {
-                                    action: action.to_string(),
-                                    index: idx,
-                                    path: path.to_path_buf(),
-                                });
-                            }
-                        }
-                    }
-                    keys
-                }
-                _ => {
-                    warnings.push(KeyBindingsWarning::InvalidKeyValue {
-                        action: action.to_string(),
-                        index: 0,
-                        path: path.to_path_buf(),
-                    });
+            let key_strings = match key_override {
+                ParsedKeyOverride::Unbind => {
+                    bindings.insert(action, Vec::new());
                     continue;
                 }
+                ParsedKeyOverride::Replace(key_strings) => key_strings,
             };
 
             // Parse each key string
@@ -2128,6 +2163,30 @@ mod tests {
         assert!(up_bindings.contains(&KeyBinding::plain("up")));
         assert!(up_bindings.contains(&KeyBinding::ctrl("p")));
         assert_eq!(up_bindings.len(), 2); // not 3
+    }
+
+    #[test]
+    fn test_load_empty_array_unbinds_default_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keybindings.json");
+
+        std::fs::write(
+            &path,
+            r#"{
+                "cursorUp": [],
+                "cursorDown": ["down"]
+            }"#,
+        )
+        .unwrap();
+
+        let result = KeyBindings::load_from_path_with_diagnostics(&path);
+
+        assert!(!result.has_warnings());
+        assert!(result.bindings.get_bindings(AppAction::CursorUp).is_empty());
+        assert_eq!(result.bindings.lookup(&KeyBinding::plain("up")), None);
+
+        let down_bindings = result.bindings.get_bindings(AppAction::CursorDown);
+        assert_eq!(down_bindings, &[KeyBinding::plain("down")]);
     }
 
     #[test]

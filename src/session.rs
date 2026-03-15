@@ -937,38 +937,39 @@ impl Session {
         let (tx, rx) = oneshot::channel();
 
         let handle = thread::spawn(move || {
-            let entries: Vec<SessionPickEntry> = SessionIndex::for_sessions_root(&base_dir_clone)
+            let indexed_meta = SessionIndex::for_sessions_root(&base_dir_clone)
                 .list_sessions(Some(&cwd_display))
-                .map(|list| {
-                    list.into_iter()
-                        .filter_map(SessionPickEntry::from_meta)
-                        .collect()
-                })
                 .unwrap_or_default();
             let cx = AgentCx::for_request();
-            let _ = tx.send(cx.cx(), Ok(entries));
+            let _ = tx.send(cx.cx(), Ok(indexed_meta));
         });
 
         let cx = AgentCx::for_request();
         let recv_result = rx.recv(cx.cx()).await;
-        let entries =
+        let indexed_meta =
             finish_worker_result(handle, recv_result, "Session picker index task cancelled")
                 .unwrap_or_default();
+        let session_index = SessionIndex::for_sessions_root(&base_dir);
+        let (entries, missing_paths) = split_indexed_session_entries(indexed_meta);
+        for path in &missing_paths {
+            prune_session_index_path(
+                &session_index,
+                path,
+                "Failed to prune missing session from index during picker refresh",
+            );
+        }
 
         let scanned = scan_sessions_on_disk(&project_session_dir, entries.clone()).await?;
         let mut by_path: HashMap<PathBuf, SessionPickEntry> = HashMap::new();
-        let index = SessionIndex::for_sessions_root(&base_dir);
         for entry in entries {
             by_path.insert(entry.path.clone(), entry);
         }
         for path in &scanned.failed_paths {
-            if let Err(err) = index.delete_session_path(path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "Failed to prune unreadable session from index during picker refresh"
-                );
-            }
+            prune_session_index_path(
+                &session_index,
+                path,
+                "Failed to prune unreadable session from index during picker refresh",
+            );
             by_path.remove(path);
         }
         for entry in scanned.entries {
@@ -1045,8 +1046,8 @@ impl Session {
             }
 
             match input.parse::<usize>() {
-                Ok(index) if index > 0 && index <= entries.len() => {
-                    let selected = &entries[index - 1];
+                Ok(selection) if selection > 0 && selection <= entries.len() => {
+                    let selected = &entries[selection - 1];
                     match Self::open(selected.path.to_string_lossy().as_ref()).await {
                         Ok(mut session) => {
                             session.session_dir = Some(base_dir.clone());
@@ -1058,7 +1059,12 @@ impl Session {
                                 error = %err,
                                 "Failed to open selected session while resuming"
                             );
-                            entries.remove(index - 1);
+                            prune_session_index_path(
+                                &session_index,
+                                &selected.path,
+                                "Failed to prune unreadable selected session after picker open failure",
+                            );
+                            entries.remove(selection - 1);
 
                             if is_interactive {
                                 console.render_warning(
@@ -1378,23 +1384,13 @@ impl Session {
 
         let handle = thread::spawn(move || {
             let index = SessionIndex::for_sessions_root(&base_dir_clone);
-            let mut indexed_sessions: Vec<SessionPickEntry> = index
+            let mut indexed_sessions = index
                 .list_sessions(Some(&cwd_display_clone))
-                .map(|list| {
-                    list.into_iter()
-                        .filter_map(SessionPickEntry::from_meta)
-                        .collect()
-                })
                 .unwrap_or_default();
 
             if indexed_sessions.is_empty() && index.reindex_all().is_ok() {
                 indexed_sessions = index
                     .list_sessions(Some(&cwd_display_clone))
-                    .map(|list| {
-                        list.into_iter()
-                            .filter_map(SessionPickEntry::from_meta)
-                            .collect()
-                    })
                     .unwrap_or_default();
             }
             let cx = AgentCx::for_request();
@@ -1403,25 +1399,31 @@ impl Session {
 
         let cx = AgentCx::for_request();
         let recv_result = rx.recv(cx.cx()).await;
-        let indexed_sessions =
+        let indexed_meta =
             finish_worker_result(handle, recv_result, "Recent session index task cancelled")
                 .unwrap_or_default();
 
-        let scanned = scan_sessions_on_disk(&project_session_dir, indexed_sessions.clone()).await?;
         let index = SessionIndex::for_sessions_root(&base_dir);
+        let (indexed_sessions, missing_paths) = split_indexed_session_entries(indexed_meta);
+        for path in &missing_paths {
+            prune_session_index_path(
+                &index,
+                path,
+                "Failed to prune missing session from index during recent-session refresh",
+            );
+        }
+        let scanned = scan_sessions_on_disk(&project_session_dir, indexed_sessions.clone()).await?;
 
         let mut by_path: HashMap<PathBuf, SessionPickEntry> = HashMap::new();
         for entry in indexed_sessions {
             by_path.insert(entry.path.clone(), entry);
         }
         for path in &scanned.failed_paths {
-            if let Err(err) = index.delete_session_path(path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "Failed to prune unreadable session from index during recent-session refresh"
-                );
-            }
+            prune_session_index_path(
+                &index,
+                path,
+                "Failed to prune unreadable session from index during recent-session refresh",
+            );
             by_path.remove(path);
         }
         for entry in scanned.entries {
@@ -1449,6 +1451,11 @@ impl Session {
                         path = %entry.path.display(),
                         error = %err,
                         "Skipping unreadable session candidate while continuing"
+                    );
+                    prune_session_index_path(
+                        &index,
+                        &entry.path,
+                        "Failed to prune unreadable session after resume candidate open failure",
                     );
                 }
             }
@@ -2748,6 +2755,38 @@ impl SessionPickEntry {
             last_modified_ms: meta.last_modified_ms,
             size_bytes: meta.size_bytes,
         })
+    }
+}
+
+fn split_indexed_session_entries(
+    metas: Vec<crate::session_index::SessionMeta>,
+) -> (Vec<SessionPickEntry>, Vec<PathBuf>) {
+    let mut entries = Vec::new();
+    let mut missing_paths = Vec::new();
+
+    for meta in metas {
+        let path = PathBuf::from(&meta.path);
+        if !path.exists() {
+            missing_paths.push(path);
+            continue;
+        }
+
+        if let Some(entry) = SessionPickEntry::from_meta(meta) {
+            entries.push(entry);
+        }
+    }
+
+    (entries, missing_paths)
+}
+
+fn prune_session_index_path(index: &SessionIndex, path: &Path, reason: &'static str) {
+    if let Err(err) = index.delete_session_path(path) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %err,
+            reason,
+            "Failed to prune session from index"
+        );
     }
 }
 
@@ -7108,6 +7147,102 @@ mod tests {
         assert!(
             !still_indexed,
             "corrupt session should be pruned from the recent-session index"
+        );
+    }
+
+    #[test]
+    fn test_continue_recent_in_dir_prunes_missing_stale_index_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::create_with_dir(Some(temp.path().to_path_buf()));
+        session.append_message(make_test_message("first"));
+
+        run_async(async { session.save().await }).expect("save session");
+        let path = session.path.clone().expect("session path");
+
+        let index = SessionIndex::for_sessions_root(temp.path());
+        index.index_session(&session).expect("index session");
+        let cwd_display = std::env::current_dir()
+            .expect("current dir")
+            .display()
+            .to_string();
+        let has_indexed_path = index
+            .list_sessions(Some(&cwd_display))
+            .expect("list indexed sessions")
+            .into_iter()
+            .any(|meta| meta.path == path.display().to_string());
+        assert!(
+            has_indexed_path,
+            "expected indexed session before moving file"
+        );
+
+        let moved_path = path.with_extension("bak");
+        std::fs::rename(&path, &moved_path).expect("move session away from indexed path");
+
+        let resumed = run_async(async {
+            Session::continue_recent_in_dir(Some(temp.path()), &Config::default()).await
+        })
+        .expect("continue recent");
+
+        assert!(resumed.path.is_none(), "expected a fresh unsaved session");
+        assert_eq!(resumed.session_dir, Some(temp.path().to_path_buf()));
+
+        let still_indexed = index
+            .list_sessions(Some(&cwd_display))
+            .expect("list indexed sessions after cleanup")
+            .into_iter()
+            .any(|meta| meta.path == path.display().to_string());
+        assert!(
+            !still_indexed,
+            "missing session should be pruned from the recent-session index"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_continue_recent_in_dir_prunes_unreadable_cached_entry_on_open_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::create_with_dir(Some(temp.path().to_path_buf()));
+        session.append_message(make_test_message("first"));
+
+        run_async(async { session.save().await }).expect("save session");
+        let path = session.path.clone().expect("session path");
+
+        let original_mode = std::fs::metadata(&path)
+            .expect("session metadata")
+            .permissions()
+            .mode();
+
+        let index = SessionIndex::for_sessions_root(temp.path());
+        index.index_session(&session).expect("index session");
+        let cwd_display = std::env::current_dir()
+            .expect("current dir")
+            .display()
+            .to_string();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod unreadable");
+
+        let resumed = run_async(async {
+            Session::continue_recent_in_dir(Some(temp.path()), &Config::default()).await
+        })
+        .expect("continue recent");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(original_mode))
+            .expect("restore permissions");
+
+        assert!(resumed.path.is_none(), "expected a fresh unsaved session");
+        assert_eq!(resumed.session_dir, Some(temp.path().to_path_buf()));
+
+        let still_indexed = index
+            .list_sessions(Some(&cwd_display))
+            .expect("list indexed sessions after cleanup")
+            .into_iter()
+            .any(|meta| meta.path == path.display().to_string());
+        assert!(
+            !still_indexed,
+            "unreadable session should be pruned from the recent-session index"
         );
     }
 

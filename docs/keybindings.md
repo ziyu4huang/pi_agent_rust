@@ -20,6 +20,14 @@ The configuration is a JSON object mapping **action IDs** (camelCase) to **key s
 }
 ```
 
+Use an empty array to remove a default binding entirely:
+
+```json
+{
+  "cursorUp": []
+}
+```
+
 ### Key Syntax
 
 Keys are specified as `modifier+key`.
