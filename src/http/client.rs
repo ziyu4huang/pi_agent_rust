@@ -423,7 +423,45 @@ impl Response {
 
     #[must_use]
     pub fn bytes_stream(self) -> Pin<Box<dyn Stream<Item = std::io::Result<Vec<u8>>> + Send>> {
-        self.stream
+        if let Some((start_time, timeout)) = self.timeout_info {
+            let stream = self.stream;
+            Box::pin(futures::stream::unfold(
+                (stream, start_time, timeout),
+                |(mut stream, start_time, timeout)| async move {
+                    use asupersync::time::{sleep, wall_now};
+                    use futures::future::{Either, FutureExt, select};
+
+                    let asupersync_now = asupersync::Cx::current()
+                        .and_then(|cx| cx.timer_driver())
+                        .map_or_else(wall_now, |timer| timer.now());
+
+                    let elapsed =
+                        std::time::Duration::from_nanos(asupersync_now.duration_since(start_time));
+                    if elapsed >= timeout {
+                        return Some((
+                            Err(std::io::Error::other("Request timed out reading body stream")),
+                            (stream, start_time, timeout),
+                        ));
+                    }
+
+                    let remaining = timeout.checked_sub(elapsed).unwrap_or_default();
+                    let sleep_fut = sleep(asupersync_now, remaining).fuse();
+                    let next_fut = stream.next().fuse();
+                    futures::pin_mut!(sleep_fut, next_fut);
+
+                    match select(next_fut, sleep_fut).await {
+                        Either::Left((Some(res), _)) => Some((res, (stream, start_time, timeout))),
+                        Either::Left((None, _)) => None,
+                        Either::Right(_) => Some((
+                            Err(std::io::Error::other("Request timed out reading body stream")),
+                            (stream, start_time, timeout),
+                        )),
+                    }
+                },
+            ))
+        } else {
+            self.stream
+        }
     }
 
     pub async fn text(self) -> Result<String> {
