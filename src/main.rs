@@ -4661,13 +4661,13 @@ fn read_piped_stdin() -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let mut data = String::new();
+    let mut data = Vec::new();
     let mut handle = io::stdin().take(100 * 1024 * 1024); // 100MB limit
-    handle.read_to_string(&mut data)?;
+    handle.read_to_end(&mut data)?;
     if data.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(data))
+        Ok(Some(String::from_utf8_lossy(&data).into_owned()))
     }
 }
 

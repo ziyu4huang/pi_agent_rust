@@ -34,7 +34,7 @@ struct WasmHostData {
     /// Maximum memory pages allowed (enforced on grow).
     max_memory_pages: u64,
     /// Files staged from JS for modules that expect a host filesystem.
-    staged_files: HashMap<String, Vec<u8>>,
+    staged_files: HashMap<String, std::sync::Arc<Vec<u8>>>,
     /// Open virtual file descriptors for staged files.
     open_files: HashMap<u32, VirtualFileHandle>,
     /// Next synthetic file descriptor.
@@ -69,7 +69,7 @@ pub(crate) struct WasmBridgeState {
     engine: Engine,
     modules: HashMap<u32, WasmModule>,
     instances: HashMap<u32, InstanceState>,
-    staged_files: HashMap<String, Vec<u8>>,
+    staged_files: HashMap<String, std::sync::Arc<Vec<u8>>>,
     next_id: u32,
     max_modules: usize,
     max_instances: usize,
@@ -479,17 +479,18 @@ fn register_host_imports(
                                             set_i32_result(results, -ERRNO_NOENT);
                                             return Ok(());
                                         }
-                                        host.staged_files.insert(path.clone(), Vec::new());
+                                        host.staged_files.insert(path.clone(), std::sync::Arc::new(Vec::new()));
                                     } else if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
                                         set_i32_result(results, -ERRNO_EXIST);
                                         return Ok(());
                                     }
 
                                     let (position, bytes_len) = {
-                                        let file =
+                                        let file_arc =
                                             host.staged_files.get_mut(&path).ok_or_else(|| {
                                                 anyhow!("Virtual file disappeared during open")
                                             })?;
+                                        let file = std::sync::Arc::make_mut(file_arc);
                                         if flags & O_TRUNC != 0 {
                                             file.clear();
                                         }
@@ -640,7 +641,7 @@ fn register_host_imports(
                                     .data()
                                     .staged_files
                                     .get(&path)
-                                    .map(std::vec::Vec::len)
+                                    .map(|v| v.len())
                                 else {
                                     set_i32_result(results, ERRNO_NOENT);
                                     return Ok(());
@@ -729,7 +730,7 @@ fn register_host_imports(
                                         let Some(file_len) = host
                                             .staged_files
                                             .get(&handle.path)
-                                            .map(std::vec::Vec::len)
+                                            .map(|v| v.len())
                                         else {
                                             set_i32_result(results, ERRNO_NOENT);
                                             return Ok(());
@@ -790,10 +791,11 @@ fn register_host_imports(
                                 }
                                 {
                                     let host = caller.data_mut();
-                                    let Some(file) = host.staged_files.get_mut(&path) else {
+                                    let Some(file_arc) = host.staged_files.get_mut(&path) else {
                                         set_i32_result(results, ERRNO_NOENT);
                                         return Ok(());
                                     };
+                                    let file = std::sync::Arc::make_mut(file_arc);
                                     if append {
                                         position = base_position;
                                     }
@@ -990,7 +992,7 @@ pub(crate) fn inject_wasm_globals(
                     }
                     let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
                     debug!(path = %path, len_bytes = bytes.len(), "wasm: staged file");
-                    st.borrow_mut().staged_files.insert(path, bytes);
+                    st.borrow_mut().staged_files.insert(path, std::sync::Arc::new(bytes));
                     Ok(len)
                 },
             ),
@@ -2364,7 +2366,7 @@ mod tests {
                 .instances
                 .get(&instance_id)
                 .and_then(|inst| inst.store.data().staged_files.get("/tmp/out.bin"))
-                .cloned();
+                .map(|arc| (**arc).clone());
             assert_eq!(contents, Some(vec![5, 6, 7]));
         });
     }
@@ -2431,7 +2433,7 @@ mod tests {
                 .instances
                 .get(&instance_id)
                 .and_then(|inst| inst.store.data().staged_files.get("/tmp/existing.bin"))
-                .cloned();
+                .map(|arc| (**arc).clone());
             assert_eq!(contents, Some(vec![9]));
         });
     }
@@ -2564,7 +2566,7 @@ mod tests {
                 .instances
                 .get(&instance_id)
                 .and_then(|inst| inst.store.data().staged_files.get("/tmp/too-big.bin"))
-                .map(std::vec::Vec::len);
+                .map(|v| v.len());
             assert_eq!(len, Some(0));
         });
     }
@@ -2648,7 +2650,7 @@ mod tests {
                 .instances
                 .get(&instance_id)
                 .and_then(|inst| inst.store.data().staged_files.get("/tmp/too-big-split.bin"))
-                .map(std::vec::Vec::len);
+                .map(|v| v.len());
             assert_eq!(len, Some(0));
         });
     }
@@ -2725,7 +2727,7 @@ mod tests {
                 .instances
                 .get(&instance_id)
                 .and_then(|inst| inst.store.data().staged_files.get("/tmp/too-big-zero.bin"))
-                .map(std::vec::Vec::len);
+                .map(|v| v.len());
             assert_eq!(len, Some(0));
         });
     }

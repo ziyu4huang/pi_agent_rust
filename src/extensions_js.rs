@@ -5257,9 +5257,9 @@ fn read_source_for_import_extraction(path: &str) -> Option<String> {
     use std::io::Read;
     let file = std::fs::File::open(path).ok()?;
     let mut handle = file.take(1024 * 1024); // 1MB limit
-    let mut buffer = String::new();
-    handle.read_to_string(&mut buffer).ok()?;
-    Some(buffer)
+    let mut buffer = Vec::new();
+    handle.read_to_end(&mut buffer).ok()?;
+    Some(String::from_utf8_lossy(&buffer).into_owned())
 }
 
 fn maybe_register_builtin_compat_overlay(
