@@ -19826,7 +19826,8 @@ async fn dispatch_extension_event_batch(
 
     // Fast path: single event — delegate to non-batch path.
     if events.len() == 1 {
-        let (name, payload) = events.into_iter().next().unwrap();
+        let mut events = events;
+        let (name, payload) = events.pop().unwrap();
         let result =
             dispatch_extension_event(runtime, host, &name, payload, ctx_payload, timeout_ms).await;
         return Ok(vec![result]);
