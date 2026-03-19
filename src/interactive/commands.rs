@@ -2135,7 +2135,8 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
             return None;
         }
 
-        let next = matches.into_iter().next().expect("matches is non-empty");
+        let mut matches = matches;
+        let next = matches.pop().expect("matches is exactly length 1 here");
 
         let resolved_key_opt = resolve_model_key_from_default_auth(&next);
         if model_requires_configured_credential(&next) && resolved_key_opt.is_none() {
