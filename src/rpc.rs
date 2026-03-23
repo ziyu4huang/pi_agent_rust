@@ -5872,7 +5872,7 @@ export default function init(pi) {
 
     #[test]
     fn try_send_line_with_backpressure_waits_until_capacity_is_available() {
-        let (tx, rx) = mpsc::channel::<String>(1);
+        let (tx, mut rx) = mpsc::channel::<String>(1);
         tx.try_send("occupied".to_string())
             .expect("seed initial occupied slot");
 
@@ -5903,7 +5903,7 @@ export default function init(pi) {
 
     #[test]
     fn try_send_line_with_backpressure_preserves_large_payload() {
-        let (tx, rx) = mpsc::channel::<String>(1);
+        let (tx, mut rx) = mpsc::channel::<String>(1);
         tx.try_send("busy".to_string())
             .expect("seed initial busy slot");
 
@@ -5951,7 +5951,7 @@ export default function init(pi) {
 
     #[test]
     fn try_send_line_with_backpressure_high_volume_preserves_order_and_count() {
-        let (tx, rx) = mpsc::channel::<String>(4);
+        let (tx, mut rx) = mpsc::channel::<String>(4);
         let lines: Vec<String> = (0..256)
             .map(|idx| format!("line-{idx:03}: {}", "x".repeat(64)))
             .collect();
@@ -5983,7 +5983,7 @@ export default function init(pi) {
 
     #[test]
     fn try_send_line_with_backpressure_preserves_partial_line_without_newline() {
-        let (tx, rx) = mpsc::channel::<String>(1);
+        let (tx, mut rx) = mpsc::channel::<String>(1);
         tx.try_send("busy".to_string())
             .expect("seed initial busy slot");
 

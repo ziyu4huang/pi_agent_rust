@@ -87,7 +87,8 @@ pub fn apply_piped_stdin(cli: &mut cli::Cli, stdin_content: Option<String>) {
 
 #[allow(clippy::missing_const_for_fn)]
 pub fn normalize_cli(cli: &mut cli::Cli) {
-    if cli.print {
+    // Don't disable session persistence when user explicitly wants to continue/resume a session
+    if cli.print && !cli.r#continue && !cli.resume && cli.session.is_none() {
         cli.no_session = true;
     }
 

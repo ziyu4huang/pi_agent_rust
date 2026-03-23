@@ -39,7 +39,7 @@ use pi::extensions::{
     resolve_extension_load_spec,
 };
 use pi::extensions_js::PiJsRuntimeConfig;
-use pi::model::{AssistantMessage, ContentBlock, StopReason, ThinkingLevel};
+use pi::model::{AssistantMessage, ContentBlock, Message, StopReason, ThinkingLevel};
 use pi::models::{ModelEntry, ModelRegistry, default_models_path};
 use pi::package_manager::{
     PackageEntry, PackageManager, PackageScope, ResolvedPaths, ResolvedResource, ResourceOrigin,
@@ -48,7 +48,7 @@ use pi::provider::InputType;
 use pi::provider_metadata::{self, PROVIDER_METADATA};
 use pi::providers;
 use pi::resources::{ResourceCliOptions, ResourceLoader};
-use pi::session::Session;
+use pi::session::{Session, SessionEntry, SessionMessage};
 use pi::session_index::SessionIndex;
 use pi::tools::ToolRegistry;
 use pi::tui::PiConsole;
@@ -1129,10 +1129,6 @@ async fn run(
         }
     });
     let is_print_mode = mode == "text" || mode == "json";
-    // Don't override session flags when user explicitly wants to continue/resume a session
-    if is_print_mode && !cli.r#continue && !cli.resume && cli.session.is_none() {
-        cli.no_session = true;
-    }
 
     let scoped_patterns = if let Some(models_arg) = &cli.models {
         pi::app::parse_models_arg(models_arg)
@@ -1157,6 +1153,34 @@ async fn run(
         is_interactive && io::stdin().is_terminal() && io::stdout().is_terminal();
     let has_extensions = !resources.extensions().is_empty();
     let session = Box::pin(Session::new(&cli, &config)).await?;
+
+    // Show which session was loaded for --continue or --session
+    if cli.r#continue || cli.session.is_some() {
+        if let Some(ref path) = session.path {
+            eprintln!("Continuing session: {} ({})", session.header.id, path.display());
+            if cli.verbose {
+                // Count various session metrics
+                let user_turns = session.entries.iter().filter(|e| {
+                    matches!(e, SessionEntry::Message(m) if matches!(m.message, SessionMessage::User { .. }))
+                }).count();
+                let assistant_turns = session.entries.iter().filter(|e| {
+                    matches!(e, SessionEntry::Message(m) if matches!(m.message, SessionMessage::Assistant { .. }))
+                }).count();
+                let tool_results = session.entries.iter().filter(|e| {
+                    matches!(e, SessionEntry::Message(m) if matches!(m.message, SessionMessage::ToolResult { .. }))
+                }).count();
+                let total_entries = session.entries.len();
+                let created = &session.header.timestamp;
+                let name = session.get_name().unwrap_or_else(|| "unnamed".to_string());
+                eprintln!(
+                    "  Name: {}, User turns: {}, Assistant turns: {}, Tool calls: {}, Total entries: {}, Created: {}",
+                    name, user_turns, assistant_turns, tool_results, total_entries, created
+                );
+            }
+        } else if cli.r#continue {
+            eprintln!("No previous session found, starting fresh");
+        }
+    }
 
     let (mut selection, mut resolved_key) = match resolve_selection_with_auth(
         &mut cli,
@@ -1490,6 +1514,7 @@ async fn run(
             &resources,
             runtime_handle.clone(),
             &config,
+            cli.verbose,
         )
         .await;
         // Explicitly shut down extension runtimes before the session drops.
@@ -4124,6 +4149,7 @@ async fn run_print_mode(
     resources: &ResourceLoader,
     runtime_handle: RuntimeHandle,
     config: &Config,
+    verbose: bool,
 ) -> Result<()> {
     if mode != "text" && mode != "json" {
         bail!("Unknown mode: {mode}");
@@ -4147,15 +4173,18 @@ async fn run_print_mode(
     }
 
     let text_stream_state = Arc::new(StdMutex::new(PrintTextStreamState::default()));
+    let print_metrics = Arc::new(StdMutex::new(PrintMetrics::default()));
     let extensions = session.extensions.as_ref().map(|r| r.manager().clone());
     let emit_json_events = mode == "json";
     let stream_text_events = mode == "text";
     let runtime_for_events = runtime_handle.clone();
     let text_stream_state_for_events = Arc::clone(&text_stream_state);
+    let print_metrics_for_events = Arc::clone(&print_metrics);
     let make_event_handler = move || {
         let extensions = extensions.clone();
         let runtime_for_events = runtime_for_events.clone();
         let text_stream_state = Arc::clone(&text_stream_state_for_events);
+        let print_metrics = Arc::clone(&print_metrics_for_events);
         let coalescer = extensions
             .as_ref()
             .map(|m| pi::extensions::EventCoalescer::new(m.clone()));
@@ -4169,9 +4198,17 @@ async fn run_print_mode(
                 match &event {
                     AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
                         emit_tool_start(tool_name, args);
+                        if let Ok(mut metrics) = print_metrics.lock() {
+                            metrics.tool_calls = metrics.tool_calls.saturating_add(1);
+                        }
                     }
                     AgentEvent::ToolExecutionEnd { tool_name, result, is_error, .. } => {
                         emit_tool_end(tool_name, result, *is_error);
+                        if *is_error {
+                            if let Ok(mut metrics) = print_metrics.lock() {
+                                metrics.tool_errors = metrics.tool_errors.saturating_add(1);
+                            }
+                        }
                     }
                     AgentEvent::MessageUpdate { assistant_message_event, .. } => {
                         match assistant_message_event {
@@ -4187,6 +4224,16 @@ async fn run_print_mode(
                                 eprintln!("∴ Thinking…");
                             }
                             _ => {}
+                        }
+                    }
+                    AgentEvent::MessageEnd { message } => {
+                        if let Ok(mut metrics) = print_metrics.lock() {
+                            metrics.update_from_message(message);
+                        }
+                    }
+                    AgentEvent::TurnEnd { .. } => {
+                        if let Ok(mut metrics) = print_metrics.lock() {
+                            metrics.turns = metrics.turns.saturating_add(1);
                         }
                     }
                     _ => {}
@@ -4277,6 +4324,22 @@ async fn run_print_mode(
         bail!("No messages were sent");
     }
 
+    // Print metrics summary in verbose mode
+    if verbose && mode == "text" {
+        if let Ok(metrics) = print_metrics.lock() {
+            eprintln!();
+            eprintln!("--- Session Metrics ---");
+            eprintln!("  Turns: {}, Tool calls: {} ({} errors)", metrics.turns, metrics.tool_calls, metrics.tool_errors);
+            eprintln!(
+                "  Tokens: {} in, {} out, {} cache read, {} cache write",
+                metrics.input_tokens, metrics.output_tokens, metrics.cache_read_tokens, metrics.cache_write_tokens
+            );
+            if metrics.total_cost > 0.0 {
+                eprintln!("  Cost: ${:.6}", metrics.total_cost);
+            }
+        }
+    }
+
     io::stdout().flush()?;
     Ok(())
 }
@@ -4306,6 +4369,31 @@ impl PrintTextStreamState {
 
     const fn needs_trailing_newline(self) -> bool {
         self.streamed_text && !self.ends_with_newline
+    }
+}
+
+/// Metrics tracked during print mode execution.
+#[derive(Debug, Default)]
+struct PrintMetrics {
+    tool_calls: usize,
+    tool_errors: usize,
+    turns: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    total_cost: f64,
+}
+
+impl PrintMetrics {
+    fn update_from_message(&mut self, message: &Message) {
+        if let Message::Assistant(assistant) = message {
+            self.input_tokens = self.input_tokens.saturating_add(assistant.usage.input);
+            self.output_tokens = self.output_tokens.saturating_add(assistant.usage.output);
+            self.cache_read_tokens = self.cache_read_tokens.saturating_add(assistant.usage.cache_read);
+            self.cache_write_tokens = self.cache_write_tokens.saturating_add(assistant.usage.cache_write);
+            self.total_cost += assistant.usage.cost.total;
+        }
     }
 }
 
