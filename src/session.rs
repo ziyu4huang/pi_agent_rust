@@ -1453,10 +1453,25 @@ impl Session {
         let mut candidates = by_path.into_values().collect::<Vec<_>>();
         candidates.sort_by_key(|entry| std::cmp::Reverse(entry.last_modified_ms));
 
+        tracing::debug!(
+            candidates_count = candidates.len(),
+            "continue_recent_in_dir: trying to open candidates"
+        );
+
         for entry in &candidates {
+            tracing::debug!(
+                path = %entry.path.display(),
+                id = %entry.id,
+                "continue_recent_in_dir: trying to open candidate"
+            );
             match Self::open(entry.path.to_string_lossy().as_ref()).await {
                 Ok(mut session) => {
                     session.session_dir = Some(base_dir.clone());
+                    tracing::debug!(
+                        path = %entry.path.display(),
+                        id = %session.header.id,
+                        "continue_recent_in_dir: successfully opened session"
+                    );
                     return Ok(session);
                 }
                 Err(err) => {
@@ -1474,6 +1489,9 @@ impl Session {
             }
         }
 
+        tracing::debug!(
+            "continue_recent_in_dir: no valid candidates found, creating new session"
+        );
         Ok(Self::create_with_dir_and_store(Some(base_dir), store_kind))
     }
 

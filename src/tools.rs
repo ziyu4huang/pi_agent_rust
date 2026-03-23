@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::extensions::strip_unc_prefix;
 use crate::model::{ContentBlock, ImageContent, TextContent};
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf, SeekFrom};
-use asupersync::time::{sleep, wall_now};
+use asupersync::time::wall_now;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -25,6 +25,19 @@ use std::thread;
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
+
+/// A reliable async sleep that works correctly with the asupersync runtime.
+///
+/// The `asupersync::time::sleep` function can hang when there's no timer driver
+/// in the current context (its fallback thread mechanism doesn't properly wake
+/// the async task). This function uses `spawn_blocking` with `std::thread::sleep`
+/// for reliable behavior.
+async fn reliable_sleep(duration: Duration) {
+    let _ = asupersync::runtime::spawn_blocking(move || {
+        std::thread::sleep(duration);
+    })
+    .await;
+}
 
 // ============================================================================
 // Tool Trait
@@ -1973,7 +1986,7 @@ pub(crate) async fn run_bash_command(
             break;
         }
 
-        sleep(now, tick).await;
+        reliable_sleep(tick).await;
     }
 
     let now_drain = cx
@@ -3532,11 +3545,7 @@ impl Tool for GrepTool {
             match guard.try_wait_child() {
                 Ok(Some(_)) => break,
                 Ok(None) => {
-                    let now = AgentCx::for_current_or_request()
-                        .cx()
-                        .timer_driver()
-                        .map_or_else(wall_now, |timer| timer.now());
-                    sleep(now, tick).await;
+                    reliable_sleep(tick).await;
                 }
                 Err(e) => return Err(Error::tool("grep", e.to_string())),
             }
@@ -3584,7 +3593,7 @@ impl Tool for GrepTool {
                 );
             }
             drain_rg_stderr(&stderr_rx, &mut stderr_bytes)?;
-            sleep(wall_now(), Duration::from_millis(1)).await;
+            reliable_sleep(Duration::from_millis(1)).await;
         }
 
         // Ensure stdout/stderr reader threads have fully drained the pipes before
@@ -3940,11 +3949,7 @@ impl Tool for FindTool {
                     if start_time.elapsed().as_millis() > timeout_ms {
                         return Err(Error::tool("find", "Command timed out after 60 seconds"));
                     }
-                    let now = AgentCx::for_current_or_request()
-                        .cx()
-                        .timer_driver()
-                        .map_or_else(wall_now, |timer| timer.now());
-                    sleep(now, tick).await;
+                    reliable_sleep(tick).await;
                 }
                 Err(e) => return Err(Error::tool("find", e.to_string())),
             }
@@ -4424,7 +4429,7 @@ async fn drain_bash_output(
                 if allow_cancellation && cx.checkpoint().is_err() {
                     return Ok(true);
                 }
-                sleep(now, tick).await;
+                reliable_sleep(tick).await;
             }
             Err(mpsc::TryRecvError::Disconnected) => return Ok(false),
         }

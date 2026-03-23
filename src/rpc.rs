@@ -40,7 +40,6 @@ use asupersync::time::{sleep, wall_now};
 use memchr::memchr_iter;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::future::Future;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -112,20 +111,6 @@ fn parse_streaming_behavior(value: Option<&Value>) -> Result<Option<StreamingBeh
         "follow-up" | "followUp" => Ok(Some(StreamingBehavior::FollowUp)),
         _ => Err(Error::validation(format!("Invalid streamingBehavior: {s}"))),
     }
-}
-
-fn future_with_current_cx<F>(
-    current_cx: asupersync::Cx,
-    future: F,
-) -> impl Future<Output = F::Output> + Send + 'static
-where
-    F: Future + Send + 'static,
-{
-    let mut future = Box::pin(future);
-    std::future::poll_fn(move |poll_cx| {
-        let _guard = asupersync::Cx::set_current(Some(current_cx.clone()));
-        future.as_mut().poll(poll_cx)
-    })
 }
 
 fn normalize_command_type(command_type: &str) -> &str {
@@ -654,46 +639,40 @@ pub async fn run(
                 if let Some((command_name, args)) = extension_command {
                     let command_runtime = runtime_handle.clone();
                     let command_cx = cx.clone();
-                    runtime_handle.spawn(future_with_current_cx(
-                        command_cx.cx().clone(),
-                        async move {
-                            run_extension_command(
-                                session,
-                                is_streaming,
-                                abort_handle_slot,
-                                out_tx,
-                                command_runtime,
-                                command_name,
-                                args,
-                                command_cx,
-                            )
-                            .await;
-                        },
-                    ));
+                    runtime_handle.spawn(async move {
+                        run_extension_command(
+                            session,
+                            is_streaming,
+                            abort_handle_slot,
+                            out_tx,
+                            command_runtime,
+                            command_name,
+                            args,
+                            command_cx,
+                        )
+                        .await;
+                    });
                 } else {
                     let retry_abort = retry_abort.clone();
                     let options = options.clone();
                     let expanded = options.resources.expand_input(&message);
                     let prompt_cx = cx.clone();
-                    runtime_handle.spawn(future_with_current_cx(
-                        prompt_cx.cx().clone(),
-                        async move {
-                            run_prompt_with_retry(
-                                session,
-                                shared_state,
-                                is_streaming,
-                                is_compacting,
-                                abort_handle_slot,
-                                out_tx,
-                                retry_abort,
-                                options,
-                                expanded,
-                                images,
-                                prompt_cx,
-                            )
-                            .await;
-                        },
-                    ));
+                    runtime_handle.spawn(async move {
+                        run_prompt_with_retry(
+                            session,
+                            shared_state,
+                            is_streaming,
+                            is_compacting,
+                            abort_handle_slot,
+                            out_tx,
+                            retry_abort,
+                            options,
+                            expanded,
+                            images,
+                            prompt_cx,
+                        )
+                        .await;
+                    });
                 }
             }
 
@@ -752,7 +731,7 @@ pub async fn run(
                 let expanded = expanded.clone();
                 let runtime_handle = options.runtime_handle.clone();
                 let prompt_cx = cx.clone();
-                runtime_handle.spawn(future_with_current_cx(prompt_cx.cx().clone(), async move {
+                runtime_handle.spawn(async move {
                     run_prompt_with_retry(
                         session,
                         shared_state,
@@ -767,7 +746,7 @@ pub async fn run(
                         prompt_cx,
                     )
                     .await;
-                }));
+                });
             }
 
             "follow_up" => {
@@ -825,7 +804,7 @@ pub async fn run(
                 let expanded = expanded.clone();
                 let runtime_handle = options.runtime_handle.clone();
                 let prompt_cx = cx.clone();
-                runtime_handle.spawn(future_with_current_cx(prompt_cx.cx().clone(), async move {
+                runtime_handle.spawn(async move {
                     run_prompt_with_retry(
                         session,
                         shared_state,
@@ -840,7 +819,7 @@ pub async fn run(
                         prompt_cx,
                     )
                     .await;
-                }));
+                });
             }
 
             "abort" => {

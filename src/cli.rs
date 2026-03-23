@@ -70,6 +70,7 @@ fn known_long_option(name: &str) -> Option<LongOptionSpec> {
         | "session-dir"
         | "session-durability"
         | "mode"
+        | "max-tool-iterations"
         | "tools"
         | "extension"
         | "extension-policy"
@@ -364,6 +365,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_tools: bool,
 
+    /// Maximum tool call iterations (default: 50, use 1 for single-shot in print mode)
+    #[arg(long)]
+    pub max_tool_iterations: Option<usize>,
+
     /// Specific tools to enable (comma-separated: read,bash,edit,write,grep,find,ls,hashline_edit)
     #[arg(
         long,
@@ -404,6 +409,10 @@ pub struct Cli {
     /// Disable skill discovery
     #[arg(long)]
     pub no_skills: bool,
+
+    /// Disable automatic skill matching (opt-out, auto-matching is enabled by default)
+    #[arg(long)]
+    pub no_auto_skill: bool,
 
     // === Prompt Templates ===
     /// Load prompt template file/directory (can use multiple times)
