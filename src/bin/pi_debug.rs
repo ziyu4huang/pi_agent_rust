@@ -71,6 +71,7 @@ async fn run_debug(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<(
         no_prompt_templates: cli.no_prompt_templates,
         no_extensions: cli.no_extensions,
         no_themes: cli.no_themes,
+        no_auto_skill: cli.no_auto_skill,
         skill_paths: cli.skill.clone(),
         prompt_paths: cli.prompt_template.clone(),
         extension_paths: cli.extension.clone(),

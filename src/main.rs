@@ -901,6 +901,7 @@ async fn run(
         no_prompt_templates: cli.no_prompt_templates,
         no_extensions: cli.no_extensions,
         no_themes: cli.no_themes,
+        no_auto_skill: cli.no_auto_skill,
         skill_paths: cli.skill.clone(),
         prompt_paths: cli.prompt_template.clone(),
         extension_paths: cli.extension.clone(),
@@ -1128,7 +1129,7 @@ async fn run(
             "text".to_string()
         }
     });
-    let is_print_mode = mode == "text" || mode == "json";
+    let _is_print_mode = mode == "text" || mode == "json";
 
     let scoped_patterns = if let Some(models_arg) = &cli.models {
         pi::app::parse_models_arg(models_arg)
@@ -4256,12 +4257,24 @@ async fn run_print_mode(
 
     let mut initial = initial;
     if let Some(ref mut initial) = initial {
-        initial.text = resources.expand_input(&initial.text);
+        let result = resources.expand_input_with_match(&initial.text);
+        if let Some(ref skill) = result.matched_skill {
+            eprintln!("● Skill({})", skill.name);
+            eprintln!("  ⎿  Auto-matched: {}", skill.description);
+        }
+        initial.text = result.text;
     }
 
     let messages = messages
         .into_iter()
-        .map(|message| resources.expand_input(&message))
+        .map(|message| {
+            let result = resources.expand_input_with_match(&message);
+            if let Some(ref skill) = result.matched_skill {
+                eprintln!("● Skill({})", skill.name);
+                eprintln!("  ⎿  Auto-matched: {}", skill.description);
+            }
+            result.text
+        })
         .collect::<Vec<_>>();
 
     let retry_enabled = config.retry_enabled();

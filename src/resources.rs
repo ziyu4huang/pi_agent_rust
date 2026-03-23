@@ -177,6 +177,7 @@ pub struct ResourceCliOptions {
     pub no_prompt_templates: bool,
     pub no_extensions: bool,
     pub no_themes: bool,
+    pub no_auto_skill: bool,
     pub skill_paths: Vec<String>,
     pub prompt_paths: Vec<String>,
     pub extension_paths: Vec<String>,
@@ -219,6 +220,21 @@ pub struct ResourceLoader {
     theme_diagnostics: Vec<ResourceDiagnostic>,
     extensions: Vec<PathBuf>,
     enable_skill_commands: bool,
+    auto_skill: bool,
+}
+
+/// Result of skill expansion with optional matched skill info for logging
+#[derive(Debug, Clone)]
+pub struct ExpandResult {
+    pub text: String,
+    pub matched_skill: Option<MatchedSkill>,
+}
+
+/// Information about a matched skill for logging
+#[derive(Debug, Clone)]
+pub struct MatchedSkill {
+    pub name: String,
+    pub description: String,
 }
 
 impl ResourceLoader {
@@ -232,6 +248,7 @@ impl ResourceLoader {
             theme_diagnostics: Vec::new(),
             extensions: Vec::new(),
             enable_skill_commands,
+            auto_skill: true,
         }
     }
 
@@ -428,6 +445,7 @@ impl ResourceLoader {
             theme_diagnostics: theme_diags,
             extensions: extension_entries,
             enable_skill_commands,
+            auto_skill: !cli.no_auto_skill,
         })
     }
 
@@ -492,6 +510,10 @@ impl ResourceLoader {
         self.enable_skill_commands
     }
 
+    pub const fn auto_skill(&self) -> bool {
+        self.auto_skill
+    }
+
     pub fn format_skills_for_prompt(&self) -> String {
         format_skills_for_prompt(&self.skills)
     }
@@ -522,12 +544,36 @@ impl ResourceLoader {
         commands
     }
 
-    pub fn expand_input(&self, text: &str) -> String {
+    /// Expand input text with skill auto-matching.
+    /// Returns expanded text and optionally the name of matched skill.
+    pub fn expand_input_with_match(&self, text: &str) -> ExpandResult {
         let mut expanded = text.to_string();
+        let mut matched_skill = None;
+
+        // 1. Explicit /skill:name expansion (takes precedence)
         if self.enable_skill_commands {
             expanded = expand_skill_command(&expanded, &self.skills);
         }
-        expand_prompt_template(&expanded, &self.prompts)
+
+        // 2. Auto-match if no explicit skill prefix was used and auto_skill is enabled
+        if !expanded.starts_with("<skill") && self.enable_skill_commands && self.auto_skill {
+            if let Some((skill_expanded, skill_info)) = auto_match_skill(&expanded, &self.skills) {
+                expanded = skill_expanded;
+                matched_skill = Some(skill_info);
+            }
+        }
+
+        // 3. Prompt template expansion
+        expanded = expand_prompt_template(&expanded, &self.prompts);
+
+        ExpandResult {
+            text: expanded,
+            matched_skill,
+        }
+    }
+
+    pub fn expand_input(&self, text: &str) -> String {
+        self.expand_input_with_match(text).text
     }
 }
 
@@ -1712,6 +1758,78 @@ fn expand_skill_command(text: &str, skills: &[Skill]) -> String {
                 skill.file_path.display()
             );
             text.to_string()
+        }
+    }
+}
+
+/// Auto-match a skill based on the first word of input.
+/// Returns (expanded_text, MatchedSkill) if matched, None otherwise.
+fn auto_match_skill(text: &str, skills: &[Skill]) -> Option<(String, MatchedSkill)> {
+    // Skip if input starts with / (could be explicit skill or template)
+    if text.starts_with('/') {
+        return None;
+    }
+
+    // Extract first word for matching
+    let first_word = text.split_whitespace().next()?;
+    let first_lower = first_word.to_lowercase();
+
+    // Try exact match on skill name first
+    for skill in skills {
+        if skill.name.eq_ignore_ascii_case(&first_lower) {
+            return expand_matched_skill(skill, text);
+        }
+    }
+
+    // Try fuzzy match on skill name (contains)
+    for skill in skills {
+        if skill.name.to_lowercase().contains(&first_lower)
+            || first_lower.contains(&skill.name.to_lowercase())
+        {
+            return expand_matched_skill(skill, text);
+        }
+    }
+
+    None
+}
+
+/// Helper to expand a matched skill
+fn expand_matched_skill(skill: &Skill, text: &str) -> Option<(String, MatchedSkill)> {
+    match fs::read_to_string(&skill.file_path) {
+        Ok(content) => {
+            let body = strip_frontmatter(&content).trim().to_string();
+            let block = format!(
+                "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
+                skill.name,
+                skill.file_path.display(),
+                skill.base_dir.display(),
+                body
+            );
+            // Remove the skill name from the beginning of args
+            let args = text
+                .split_whitespace()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let expanded = if args.is_empty() {
+                block
+            } else {
+                format!("{block}\n\n{args}")
+            };
+            Some((
+                expanded,
+                MatchedSkill {
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                },
+            ))
+        }
+        Err(err) => {
+            eprintln!(
+                "Warning: Failed to read skill {}: {err}",
+                skill.file_path.display()
+            );
+            None
         }
     }
 }

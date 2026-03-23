@@ -410,6 +410,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_skills: bool,
 
+    /// Disable automatic skill matching (opt-out, auto-matching is enabled by default)
+    #[arg(long)]
+    pub no_auto_skill: bool,
+
     // === Prompt Templates ===
     /// Load prompt template file/directory (can use multiple times)
     #[arg(long, action = clap::ArgAction::Append)]
