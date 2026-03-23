@@ -1,6 +1,6 @@
 {
   "schema": "pi.ci.full_suite_gate.v1",
-  "generated_at": "2026-03-22T03:10:44.028Z",
+  "generated_at": "2026-03-22T04:01:44.623Z",
   "verdict": "fail",
   "policy": "Full-suite gate: all blocking gates must pass for release. Non-blocking gates produce warnings but do not block.",
   "gates": [

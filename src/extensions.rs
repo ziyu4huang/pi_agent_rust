@@ -19523,6 +19523,17 @@ fn discover_sibling_extension_entries(primary: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
 
+    // Skip sibling discovery when the parent is a known auto-discovery root
+    // (e.g., ~/.pi/agent/extensions/ or .pi/extensions/). Files in these
+    // directories are independent extensions, not siblings of a single package.
+    if parent_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("extensions"))
+    {
+        return Vec::new();
+    }
+
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let mut sibling_files = Vec::new();
