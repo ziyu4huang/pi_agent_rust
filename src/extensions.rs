@@ -22256,7 +22256,24 @@ async fn dispatch_hostcall_exec_ref(
     cmd: &str,
     payload: &Value,
 ) -> HostcallOutcome {
-    use std::io::Read as _;
+    dispatch_hostcall_exec_ref_with_limit(
+        runtime,
+        call_id,
+        cmd,
+        payload,
+        crate::tools::READ_TOOL_MAX_BYTES,
+    )
+    .await
+}
+
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+async fn dispatch_hostcall_exec_ref_with_limit(
+    runtime: Option<&PiJsRuntime>,
+    call_id: &str,
+    cmd: &str,
+    payload: &Value,
+    max_capture_bytes: u64,
+) -> HostcallOutcome {
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 
@@ -22646,24 +22663,10 @@ async fn dispatch_hostcall_exec_ref(
             let mut stderr = child.stderr.take().ok_or("Missing stderr pipe")?;
 
             let stdout_handle = thread::spawn(move || -> std::result::Result<Vec<u8>, String> {
-                let mut buf = Vec::new();
-                std::io::Read::take(
-                    &mut stdout,
-                    crate::tools::READ_TOOL_MAX_BYTES.saturating_add(1),
-                )
-                .read_to_end(&mut buf)
-                .map_err(|err| err.to_string())?;
-                Ok(buf)
+                crate::tools::read_to_end_capped_and_drain(&mut stdout, max_capture_bytes)
             });
             let stderr_handle = thread::spawn(move || -> std::result::Result<Vec<u8>, String> {
-                let mut buf = Vec::new();
-                std::io::Read::take(
-                    &mut stderr,
-                    crate::tools::READ_TOOL_MAX_BYTES.saturating_add(1),
-                )
-                .read_to_end(&mut buf)
-                .map_err(|err| err.to_string())?;
-                Ok(buf)
+                crate::tools::read_to_end_capped_and_drain(&mut stderr, max_capture_bytes)
             });
 
             let start = Instant::now();
@@ -22695,11 +22698,11 @@ async fn dispatch_hostcall_exec_ref(
                 .map_err(|err| format!("Read stderr: {err}"))?;
 
             let mut stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-            if stdout_bytes.len() as u64 > crate::tools::READ_TOOL_MAX_BYTES {
+            if stdout_bytes.len() as u64 > max_capture_bytes {
                 stdout.push_str("\n... [stdout truncated] ...");
             }
             let mut stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-            if stderr_bytes.len() as u64 > crate::tools::READ_TOOL_MAX_BYTES {
+            if stderr_bytes.len() as u64 > max_capture_bytes {
                 stderr.push_str("\n... [stderr truncated] ...");
             }
             let code = exit_status_code(status);
@@ -50226,5 +50229,41 @@ mod tests {
             }
             other => panic!(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_hostcall_truncation_does_not_sigpipe_writer() {
+        asupersync::test_utils::run_test(|| async {
+            let payload = json!({
+                "args": ["if=/dev/zero", "bs=1", "count=70000", "status=none"],
+            });
+
+            let outcome =
+                dispatch_hostcall_exec_ref_with_limit(None, "call-dd", "dd", &payload, 1024).await;
+            match outcome {
+                HostcallOutcome::Success(value) => {
+                    assert_eq!(
+                        value.get("code").and_then(Value::as_i64),
+                        Some(0),
+                        "truncated exec capture must not change writer exit status: {value}"
+                    );
+                    assert_eq!(
+                        value.get("killed").and_then(Value::as_bool),
+                        Some(false),
+                        "bounded exec capture should not kill the process: {value}"
+                    );
+                    let stdout = value
+                        .get("stdout")
+                        .and_then(Value::as_str)
+                        .expect("stdout string");
+                    assert!(
+                        stdout.contains("[stdout truncated]"),
+                        "large stdout should still report truncation"
+                    );
+                }
+                other => panic!("expected exec success outcome, got {other:?}"),
+            }
+        });
     }
 }

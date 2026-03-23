@@ -5064,6 +5064,41 @@ fn is_proxy_allowlisted_package(spec: &str) -> bool {
     false
 }
 
+fn capture_with_max_buffer(
+    mut reader: impl std::io::Read,
+    limit_bytes: usize,
+    limit_exceeded: &std::sync::atomic::AtomicBool,
+    stream_name: &'static str,
+) -> (Vec<u8>, Option<String>) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut overflowed = false;
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return (buf, Some(e.to_string())),
+        };
+        if n == 0 {
+            break;
+        }
+
+        let remaining = limit_bytes.saturating_sub(buf.len());
+        if remaining > 0 {
+            let keep = remaining.min(n);
+            buf.extend_from_slice(&chunk[..keep]);
+        }
+
+        if n > remaining {
+            overflowed = true;
+            limit_exceeded.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
+    let error = overflowed.then(|| format!("ENOBUFS: {stream_name} maxBuffer length exceeded"));
+    (buf, error)
+}
+
 // Limit extension source size to prevent OOM/DoS during load.
 const MAX_MODULE_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -14962,7 +14997,6 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                               timeout_ms: Opt<f64>,
                               max_buffer: Opt<f64>|
                               -> rquickjs::Result<String> {
-                            use std::io::Read as _;
                             use std::process::{Command, Stdio};
                             use std::sync::atomic::AtomicBool;
                             use std::time::{Duration, Instant};
@@ -15073,55 +15107,31 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                 let mut child = command.spawn().map_err(|e| e.to_string())?;
                                 let pid = child.id();
 
-                                let mut stdout_pipe =
+                                let stdout_pipe =
                                     child.stdout.take().ok_or("Missing stdout pipe")?;
-                                let mut stderr_pipe =
+                                let stderr_pipe =
                                     child.stderr.take().ok_or("Missing stderr pipe")?;
 
                                 let limit_exceeded = Arc::new(AtomicBool::new(false));
                                 let limit_exceeded_stdout = limit_exceeded.clone();
                                 let limit_exceeded_stderr = limit_exceeded.clone();
 
-                                let stdout_handle = std::thread::spawn(
-                                    move || -> (Vec<u8>, Option<String>) {
-                                        let mut buf = Vec::new();
-                                        let mut chunk = [0u8; 8192];
-                                        loop {
-                                            let n = match stdout_pipe.read(&mut chunk) {
-                                                Ok(n) => n,
-                                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                                                Err(e) => return (buf, Some(e.to_string())),
-                                            };
-                                            if n == 0 { break; }
-                                            if buf.len() + n > limit_bytes {
-                                                limit_exceeded_stdout.store(true, AtomicOrdering::Relaxed);
-                                                return (buf, Some("ENOBUFS: stdout maxBuffer length exceeded".to_string()));
-                                            }
-                                            buf.extend_from_slice(&chunk[..n]);
-                                        }
-                                        (buf, None)
-                                    },
-                                );
-                                let stderr_handle = std::thread::spawn(
-                                    move || -> (Vec<u8>, Option<String>) {
-                                        let mut buf = Vec::new();
-                                        let mut chunk = [0u8; 8192];
-                                        loop {
-                                            let n = match stderr_pipe.read(&mut chunk) {
-                                                Ok(n) => n,
-                                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                                                Err(e) => return (buf, Some(e.to_string())),
-                                            };
-                                            if n == 0 { break; }
-                                            if buf.len() + n > limit_bytes {
-                                                limit_exceeded_stderr.store(true, AtomicOrdering::Relaxed);
-                                                return (buf, Some("ENOBUFS: stderr maxBuffer length exceeded".to_string()));
-                                            }
-                                            buf.extend_from_slice(&chunk[..n]);
-                                        }
-                                        (buf, None)
-                                    },
-                                );
+                                let stdout_handle = std::thread::spawn(move || {
+                                    capture_with_max_buffer(
+                                        stdout_pipe,
+                                        limit_bytes,
+                                        limit_exceeded_stdout.as_ref(),
+                                        "stdout",
+                                    )
+                                });
+                                let stderr_handle = std::thread::spawn(move || {
+                                    capture_with_max_buffer(
+                                        stderr_pipe,
+                                        limit_bytes,
+                                        limit_exceeded_stderr.as_ref(),
+                                        "stderr",
+                                    )
+                                });
 
                                 let start = Instant::now();
                                 let mut killed = false;
@@ -24655,6 +24665,51 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
     }
 
     #[test]
+    fn pijs_exec_sync_throws_when_stdout_exceeds_max_buffer() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let runtime = runtime_with_sync_exec_enabled(Arc::clone(&clock)).await;
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.syncMaxBuffer = {};
+                    import('node:child_process').then(({ execSync }) => {
+                        try {
+                            execSync(
+                                "python3 -c 'import sys; sys.stdout.write(\"x\" * 70000)'",
+                                { maxBuffer: 1024 }
+                            );
+                            globalThis.syncMaxBuffer.threw = false;
+                        } catch (e) {
+                            globalThis.syncMaxBuffer.threw = true;
+                            globalThis.syncMaxBuffer.msg = String((e && e.message) || e || '');
+                            globalThis.syncMaxBuffer.stdoutLen =
+                                typeof e.stdout === 'string' ? e.stdout.length : -1;
+                        }
+                        globalThis.syncMaxBuffer.done = true;
+                    });
+                    "#,
+                )
+                .await
+                .expect("eval execSync maxBuffer");
+
+            let r = get_global_json(&runtime, "syncMaxBuffer").await;
+            assert_eq!(r["done"], serde_json::json!(true));
+            assert_eq!(r["threw"], serde_json::json!(true));
+            assert!(
+                r["msg"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("maxBuffer length exceeded"),
+                "unexpected maxBuffer message: {}",
+                r["msg"]
+            );
+            assert_eq!(r["stdoutLen"].as_f64(), Some(1024.0));
+        });
+    }
+
+    #[test]
     fn pijs_exec_sync_throws_on_nonzero_exit() {
         futures::executor::block_on(async {
             let clock = Arc::new(DeterministicClock::new(0));
@@ -24837,6 +24892,52 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
             let r = get_global_json(&runtime, "execFileResult").await;
             assert_eq!(r["done"], serde_json::json!(true));
             assert_eq!(r["stdout"], serde_json::json!("file-sync-test"));
+        });
+    }
+
+    #[test]
+    fn pijs_exec_file_sync_throws_when_stdout_exceeds_max_buffer() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let runtime = runtime_with_sync_exec_enabled(Arc::clone(&clock)).await;
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.execFileMaxBuffer = {};
+                    import('node:child_process').then(({ execFileSync }) => {
+                        try {
+                            execFileSync(
+                                'python3',
+                                ['-c', 'import sys; sys.stdout.write("x" * 70000)'],
+                                { maxBuffer: 1024 }
+                            );
+                            globalThis.execFileMaxBuffer.threw = false;
+                        } catch (e) {
+                            globalThis.execFileMaxBuffer.threw = true;
+                            globalThis.execFileMaxBuffer.msg = String((e && e.message) || e || '');
+                            globalThis.execFileMaxBuffer.stdoutLen =
+                                typeof e.stdout === 'string' ? e.stdout.length : -1;
+                        }
+                        globalThis.execFileMaxBuffer.done = true;
+                    });
+                    "#,
+                )
+                .await
+                .expect("eval execFileSync maxBuffer");
+
+            let r = get_global_json(&runtime, "execFileMaxBuffer").await;
+            assert_eq!(r["done"], serde_json::json!(true));
+            assert_eq!(r["threw"], serde_json::json!(true));
+            assert!(
+                r["msg"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("maxBuffer length exceeded"),
+                "unexpected execFileSync maxBuffer message: {}",
+                r["msg"]
+            );
+            assert_eq!(r["stdoutLen"].as_f64(), Some(1024.0));
         });
     }
 

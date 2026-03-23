@@ -2027,6 +2027,25 @@ export default function init(pi) {
     }
 
     #[test]
+    fn resolve_azure_provider_runtime_prefers_base_url_deployment_over_model_id() {
+        let entry = model_entry(
+            "azure-openai",
+            "openai-completions",
+            "model-fallback",
+            "https://myresource.openai.azure.com/openai/deployments/base-deploy/chat/completions?api-version=2024-10-21",
+        );
+        let runtime =
+            resolve_azure_provider_runtime_with_env(&entry, |_| None).expect("resolve runtime");
+        assert_eq!(runtime.resource, "myresource");
+        assert_eq!(runtime.deployment, "base-deploy");
+        assert_eq!(runtime.api_version, "2024-10-21");
+        assert_eq!(
+            runtime.endpoint_url,
+            "https://myresource.openai.azure.com/openai/deployments/base-deploy/chat/completions?api-version=2024-10-21"
+        );
+    }
+
+    #[test]
     fn resolve_azure_provider_runtime_env_deployment_overrides_base_url_and_model_id() {
         let entry = model_entry(
             "azure-openai",

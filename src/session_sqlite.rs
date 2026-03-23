@@ -38,7 +38,12 @@ fn map_sqlite_result<T>(result: std::result::Result<T, SqliteError>) -> Result<T
     result.map_err(|err| Error::session(format!("SQLite session error: {err}")))
 }
 
-fn open_sqlite_connection(path: &Path) -> Result<SqliteConnection> {
+fn open_sqlite_connection_read_only(path: &Path) -> Result<SqliteConnection> {
+    let config = SqliteConfig::file(path.to_string_lossy()).flags(OpenFlags::read_only());
+    map_sqlite_result(SqliteConnection::open(&config))
+}
+
+fn open_sqlite_connection_read_write(path: &Path) -> Result<SqliteConnection> {
     let config = SqliteConfig::file(path.to_string_lossy()).flags(OpenFlags::create_read_write());
     map_sqlite_result(SqliteConnection::open(&config))
 }
@@ -81,7 +86,7 @@ pub async fn load_session(path: &Path) -> Result<(SessionHeader, Vec<SessionEntr
         });
     }
 
-    let conn = open_sqlite_connection(path)?;
+    let conn = open_sqlite_connection_read_only(path)?;
 
     let header_rows =
         map_sqlite_result(conn.query_sync("SELECT json FROM pi_session_header LIMIT 1", &[]))?;
@@ -118,7 +123,7 @@ pub async fn load_session_meta(path: &Path) -> Result<SqliteSessionMeta> {
         });
     }
 
-    let conn = open_sqlite_connection(path)?;
+    let conn = open_sqlite_connection_read_only(path)?;
 
     let header_rows =
         map_sqlite_result(conn.query_sync("SELECT json FROM pi_session_header LIMIT 1", &[]))?;
@@ -536,6 +541,48 @@ mod tests {
             "expected invalid session header error, got {message}"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_paths_accept_read_only_sqlite_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("readonly.sqlite");
+        let header = SessionHeader {
+            id: "sqlite-readonly".to_string(),
+            ..SessionHeader::default()
+        };
+        let entries = vec![
+            session_info_entry(Some("Read Only".to_string())),
+            message_entry(),
+        ];
+
+        futures::executor::block_on(async { save_session(&path, &header, &entries).await })
+            .expect("save sqlite session");
+
+        let original_mode = std::fs::metadata(&path)
+            .expect("sqlite metadata")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+            .expect("chmod readonly sqlite");
+
+        let (loaded_header, loaded_entries) =
+            futures::executor::block_on(async { load_session(&path).await })
+                .expect("load readonly sqlite session");
+        let meta = futures::executor::block_on(async { load_session_meta(&path).await })
+            .expect("load readonly sqlite meta");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(original_mode))
+            .expect("restore sqlite permissions");
+
+        assert_eq!(loaded_header.id, header.id);
+        assert_eq!(loaded_entries.len(), entries.len());
+        assert_eq!(meta.header.id, header.id);
+        assert_eq!(meta.message_count, 1);
+        assert_eq!(meta.name.as_deref(), Some("Read Only"));
+    }
 }
 
 pub async fn save_session(
@@ -553,7 +600,7 @@ pub async fn save_session(
         asupersync::fs::create_dir_all(parent).await?;
     }
 
-    let conn = open_sqlite_connection(path)?;
+    let conn = open_sqlite_connection_read_write(path)?;
     map_sqlite_result(conn.execute_raw(INIT_SQL))?;
     map_sqlite_result(conn.execute_raw("BEGIN IMMEDIATE"))?;
 
@@ -651,7 +698,7 @@ pub async fn append_entries(
     let metrics = session_metrics::global();
     let _timer = metrics.start_timer(&metrics.sqlite_append);
 
-    let conn = open_sqlite_connection(path)?;
+    let conn = open_sqlite_connection_read_write(path)?;
 
     // Ensure WAL mode is active and tables exist (especially pi_session_meta for old DBs).
     map_sqlite_result(conn.execute_raw(INIT_SQL))?;

@@ -7749,6 +7749,50 @@ fn tui_scroll_follows_tail_by_default_during_stream() {
     assert_eq!(pct2, 100, "should still auto-follow tail");
 }
 
+#[test]
+fn tui_system_message_restores_tail_visibility_after_user_scrolls_up() {
+    let harness =
+        TestHarness::new("tui_system_message_restores_tail_visibility_after_user_scrolls_up");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 20);
+    log_initial_state(&harness, &app);
+
+    let mut code_block = String::from("```\n");
+    for i in 1..=200 {
+        let _ = writeln!(code_block, "system line {i:03}");
+    }
+    code_block.push_str("```\n");
+
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(code block)",
+        PiMsg::TextDelta(code_block),
+    );
+    let _ = finalize_agent(&harness, &mut app);
+
+    press_pgup(&harness, &mut app);
+    press_pgup(&harness, &mut app);
+
+    let before = normalize_view(&BubbleteaModel::view(&app));
+    assert!(
+        !before.contains("system line 200"),
+        "expected viewport to be away from the latest content before system message"
+    );
+
+    let marker = "SYSTEM-TAIL-MARKER-7f2f0c";
+    let step = apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::System",
+        PiMsg::System(marker.to_string()),
+    );
+
+    assert_after_contains(&harness, &step, marker);
+    assert_after_contains(&harness, &step, "system line 200");
+}
+
 // ============================================================================
 // Final Assistant Message Overwrite Tests
 // ============================================================================

@@ -1982,11 +1982,16 @@ fn module_cache_dir() -> Option<PathBuf> {
 /// Returns `true` when `path` resides under the transpiled module cache directory
 /// (`~/.pi/agent/cache/modules/` or `$PIJS_MODULE_CACHE_DIR`).
 fn is_cache_module_path(path: &Path) -> bool {
-    let Some(cache_dir) = module_cache_dir() else {
+    let cache_dir = module_cache_dir();
+    is_cache_module_path_with_cache_dir(path, cache_dir.as_deref())
+}
+
+fn is_cache_module_path_with_cache_dir(path: &Path, cache_dir: Option<&Path>) -> bool {
+    let Some(cache_dir) = cache_dir else {
         return false;
     };
     let canonical = canonical_identity_path(path);
-    let canonical_cache = canonical_identity_path(&cache_dir);
+    let canonical_cache = canonical_identity_path(cache_dir);
     canonical.starts_with(&canonical_cache)
 }
 
@@ -2013,6 +2018,10 @@ fn extension_id_from_path(path: &Path) -> Option<String> {
     }
 }
 
+fn extension_dedupe_key_from_path(path: &Path) -> Option<String> {
+    extension_id_from_path(path).map(|id| id.to_ascii_lowercase())
+}
+
 /// Deduplicate extension entries by canonical extension ID, preferring source
 /// entries over transpiled cache copies (Issue #37).
 ///
@@ -2020,15 +2029,23 @@ fn extension_id_from_path(path: &Path) -> Option<String> {
 /// `~/.pi/agent/cache/modules/` are discovered, the cache entry is dropped to
 /// prevent command collisions at load time.
 fn dedupe_extension_entries_by_id(entries: Vec<PathBuf>) -> Vec<PathBuf> {
+    let cache_dir = module_cache_dir();
+    dedupe_extension_entries_by_id_with_cache_dir(entries, cache_dir.as_deref())
+}
+
+fn dedupe_extension_entries_by_id_with_cache_dir(
+    entries: Vec<PathBuf>,
+    cache_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     // First pass: collect extension IDs and identify cache vs source entries.
     let mut id_to_source_idx: HashMap<String, usize> = HashMap::new();
     let mut is_cache = Vec::with_capacity(entries.len());
 
     for (idx, path) in entries.iter().enumerate() {
-        let cache = is_cache_module_path(path);
+        let cache = is_cache_module_path_with_cache_dir(path, cache_dir);
         is_cache.push(cache);
 
-        if let Some(id) = extension_id_from_path(path) {
+        if let Some(id) = extension_dedupe_key_from_path(path) {
             if !cache {
                 // Source entry wins; record its index.
                 id_to_source_idx.entry(id).or_insert(idx);
@@ -2041,7 +2058,7 @@ fn dedupe_extension_entries_by_id(entries: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(entries.len());
     for (idx, path) in entries.into_iter().enumerate() {
         if is_cache[idx] {
-            if let Some(id) = extension_id_from_path(&path) {
+            if let Some(id) = extension_dedupe_key_from_path(&path) {
                 if id_to_source_idx.contains_key(&id) {
                     // Skip cache entry — source entry is preferred.
                     continue;
@@ -2682,6 +2699,32 @@ mod tests {
                 .count();
             assert_eq!(matches, 1);
         });
+    }
+
+    #[test]
+    fn test_dedupe_extension_entries_by_id_casefolds_cache_source_pairs() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp_dir.path().join("source");
+        let cache_dir = temp_dir.path().join("cache").join("modules");
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+
+        let source_entry = source_dir.join("Foo.ts");
+        let cache_entry = cache_dir.join("foo.js");
+        fs::write(&source_entry, "export default function init() {}\n")
+            .expect("write source entry");
+        fs::write(&cache_entry, "export default function init() {}\n").expect("write cache entry");
+
+        let deduped = dedupe_extension_entries_by_id_with_cache_dir(
+            vec![cache_entry, source_entry.clone()],
+            Some(&cache_dir),
+        );
+
+        assert_eq!(
+            deduped,
+            vec![source_entry],
+            "case-variant cache copy should be dropped in favor of the source entry"
+        );
     }
 
     #[test]

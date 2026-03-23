@@ -474,6 +474,7 @@ impl PiApp {
                 self.abort_handle = None;
                 self.extension_streaming.store(false, Ordering::SeqCst);
                 self.extension_compacting.store(false, Ordering::SeqCst);
+                self.scroll_to_bottom();
                 self.input.focus();
 
                 if !self.pending_inputs.is_empty() {

@@ -3518,14 +3518,7 @@ impl Tool for GrepTool {
 
         let stderr_thread = std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
-            let mut buf = Vec::new();
-            let _ = stderr_tx.send(
-                reader
-                    .take(READ_TOOL_MAX_BYTES.saturating_add(1))
-                    .read_to_end(&mut buf)
-                    .map(|_| buf)
-                    .map_err(|err| err.to_string()),
-            );
+            let _ = stderr_tx.send(read_to_end_capped_and_drain(reader, READ_TOOL_MAX_BYTES));
         });
 
         let mut matches: Vec<(PathBuf, usize)> = Vec::new();
@@ -3937,21 +3930,11 @@ impl Tool for FindTool {
         let mut guard = ProcessGuard::new(child, ProcessCleanupMode::ChildOnly);
 
         let stdout_handle = std::thread::spawn(move || -> std::result::Result<Vec<u8>, String> {
-            let mut buf = Vec::new();
-            stdout_pipe
-                .take(READ_TOOL_MAX_BYTES.saturating_add(1))
-                .read_to_end(&mut buf)
-                .map_err(|err| err.to_string())?;
-            Ok(buf)
+            read_to_end_capped_and_drain(stdout_pipe, READ_TOOL_MAX_BYTES)
         });
 
         let stderr_handle = std::thread::spawn(move || -> std::result::Result<Vec<u8>, String> {
-            let mut buf = Vec::new();
-            stderr_pipe
-                .take(READ_TOOL_MAX_BYTES.saturating_add(1))
-                .read_to_end(&mut buf)
-                .map_err(|err| err.to_string())?;
-            Ok(buf)
+            read_to_end_capped_and_drain(stderr_pipe, READ_TOOL_MAX_BYTES)
         });
 
         let tick = Duration::from_millis(10);
@@ -4389,6 +4372,35 @@ fn pump_stream<R: Read + Send + 'static>(mut reader: R, tx: &mpsc::SyncSender<Ve
             Err(_) => break,
         }
     }
+}
+
+/// Read from a subprocess pipe until EOF while retaining only the first
+/// `max_bytes + 1` bytes in memory so callers can detect truncation without
+/// changing child-process behavior by closing the pipe early.
+pub(crate) fn read_to_end_capped_and_drain<R: Read>(
+    mut reader: R,
+    max_bytes: u64,
+) -> std::result::Result<Vec<u8>, String> {
+    let capture_limit = usize::try_from(max_bytes.saturating_add(1)).unwrap_or(usize::MAX);
+    let mut captured = Vec::with_capacity(capture_limit.min(8192));
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                let remaining = capture_limit.saturating_sub(captured.len());
+                if remaining > 0 {
+                    let keep = remaining.min(read);
+                    captured.extend_from_slice(&chunk[..keep]);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+
+    Ok(captured)
 }
 
 // Keep `rx` as `&mut Receiver`: `std::sync::mpsc::Receiver` is `Send` but not
@@ -5676,6 +5688,26 @@ mod tests {
 
         assert!(result.truncated);
         assert_eq!(result.truncated_by, Some(TruncatedBy::Bytes));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_read_to_end_capped_and_drain_preserves_writer_exit_status() {
+        let mut child = std::process::Command::new("dd")
+            .args(["if=/dev/zero", "bs=1", "count=70000", "status=none"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn dd");
+
+        let stdout = child.stdout.take().expect("dd stdout");
+        let captured = read_to_end_capped_and_drain(stdout, 1024).expect("capture bounded stdout");
+        let status = child.wait().expect("wait for dd");
+
+        assert!(
+            status.success(),
+            "bounded reader should drain to EOF instead of SIGPIPEing the writer: {status:?}"
+        );
+        assert_eq!(captured.len(), 1025);
     }
 
     #[test]

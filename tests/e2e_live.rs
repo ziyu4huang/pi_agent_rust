@@ -626,10 +626,20 @@ fn parse_azure_base_url_details(
 }
 
 fn resolve_azure_runtime_config(config: &LiveProviderConfig) -> Result<AzureRuntimeConfig, String> {
+    resolve_azure_runtime_config_with_lookup(config, optional_env)
+}
+
+fn resolve_azure_runtime_config_with_lookup<F>(
+    config: &LiveProviderConfig,
+    mut env_lookup: F,
+) -> Result<AzureRuntimeConfig, String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
     let (base_resource, base_deployment, base_api_version) =
         parse_azure_base_url_details(&config.base_url);
 
-    let resource = optional_env("AZURE_OPENAI_RESOURCE")
+    let resource = env_lookup("AZURE_OPENAI_RESOURCE")
         .or(base_resource)
         .ok_or_else(|| {
             format!(
@@ -638,7 +648,7 @@ fn resolve_azure_runtime_config(config: &LiveProviderConfig) -> Result<AzureRunt
             )
         })?;
 
-    let deployment = optional_env("AZURE_OPENAI_DEPLOYMENT")
+    let deployment = env_lookup("AZURE_OPENAI_DEPLOYMENT")
         .or(base_deployment)
         .or_else(|| {
             let deployment = config.model_id.trim();
@@ -651,7 +661,7 @@ fn resolve_azure_runtime_config(config: &LiveProviderConfig) -> Result<AzureRunt
             )
         })?;
 
-    let api_version = optional_env("AZURE_OPENAI_API_VERSION").or(base_api_version);
+    let api_version = env_lookup("AZURE_OPENAI_API_VERSION").or(base_api_version);
 
     Ok(AzureRuntimeConfig {
         resource,
@@ -684,6 +694,27 @@ fn resolve_azure_runtime_config_prefers_base_url_deployment_over_model_id() {
     let runtime = resolve_azure_runtime_config(&config).expect("resolve azure runtime config");
     assert_eq!(runtime.resource, "myresource");
     assert_eq!(runtime.deployment, "base-deploy");
+    assert_eq!(runtime.api_version.as_deref(), Some("2024-10-21"));
+}
+
+#[test]
+fn resolve_azure_runtime_config_env_deployment_overrides_base_url_and_model_id() {
+    let config = LiveProviderConfig {
+        provider: "azure-openai".to_string(),
+        model_id: "model-fallback".to_string(),
+        api: "openai-completions".to_string(),
+        base_url: "https://myresource.openai.azure.com/openai/deployments/base-deploy/chat/completions?api-version=2024-10-21".to_string(),
+        api_key: "test-key".to_string(),
+        auth_source: "env:AZURE_OPENAI_API_KEY".to_string(),
+    };
+
+    let runtime = resolve_azure_runtime_config_with_lookup(&config, |name| match name {
+        "AZURE_OPENAI_DEPLOYMENT" => Some("env-deploy".to_string()),
+        _ => None,
+    })
+    .expect("resolve azure runtime config");
+    assert_eq!(runtime.resource, "myresource");
+    assert_eq!(runtime.deployment, "env-deploy");
     assert_eq!(runtime.api_version.as_deref(), Some("2024-10-21"));
 }
 
