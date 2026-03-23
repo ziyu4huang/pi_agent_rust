@@ -1129,7 +1129,8 @@ async fn run(
         }
     });
     let is_print_mode = mode == "text" || mode == "json";
-    if is_print_mode {
+    // Don't override session flags when user explicitly wants to continue/resume a session
+    if is_print_mode && !cli.r#continue && !cli.resume && cli.session.is_none() {
         cli.no_session = true;
     }
 
@@ -1211,7 +1212,7 @@ async fn run(
         pi::app::build_stream_options(&config, resolved_key.clone(), &selection, &session);
     let agent_config = AgentConfig {
         system_prompt: Some(system_prompt),
-        max_tool_iterations: 50,
+        max_tool_iterations: cli.max_tool_iterations.unwrap_or(50),
         stream_options,
         block_images: config.image_block_images(),
     };
@@ -4163,14 +4164,33 @@ async fn run_print_mode(
                 if let Ok(serialized) = serde_json::to_string(&event) {
                     println!("{serialized}");
                 }
-            } else if stream_text_events
-                && let Some(delta) = streamed_text_delta(&event)
-                && emit_text_delta(delta).is_ok()
-            {
-                let mut guard = text_stream_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard.observe_delta(delta);
+            } else if stream_text_events {
+                // Handle different event types for text mode visualization
+                match &event {
+                    AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
+                        emit_tool_start(tool_name, args);
+                    }
+                    AgentEvent::ToolExecutionEnd { tool_name, result, is_error, .. } => {
+                        emit_tool_end(tool_name, result, *is_error);
+                    }
+                    AgentEvent::MessageUpdate { assistant_message_event, .. } => {
+                        match assistant_message_event {
+                            pi::model::AssistantMessageEvent::TextDelta { delta, .. } => {
+                                if emit_text_delta(delta).is_ok() {
+                                    let mut guard = text_stream_state
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    guard.observe_delta(delta);
+                                }
+                            }
+                            pi::model::AssistantMessageEvent::ThinkingStart { .. } => {
+                                eprintln!("∴ Thinking…");
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
             }
             // Route non-lifecycle events through the coalescer for
             // batched/coalesced dispatch with lazy serialization.
@@ -4304,6 +4324,63 @@ fn emit_text_delta(delta: &str) -> io::Result<()> {
     let mut out = stdout.lock();
     out.write_all(delta.as_bytes())?;
     out.flush()
+}
+
+/// Format tool arguments for display, truncating if too long.
+fn format_tool_args(args: &serde_json::Value, max_len: usize) -> String {
+    let args_str = if args.is_object() || args.is_array() {
+        // Pretty format for objects/arrays, but compact
+        serde_json::to_string(args).unwrap_or_else(|_| args.to_string())
+    } else {
+        args.to_string()
+    };
+    if args_str.len() > max_len {
+        format!("{}...", &args_str[..max_len])
+    } else {
+        args_str
+    }
+}
+
+/// Format tool result for display, extracting text content.
+fn format_tool_result(result: &pi::tools::ToolOutput, max_len: usize) -> String {
+    let mut text_parts = Vec::new();
+    for block in &result.content {
+        if let pi::model::ContentBlock::Text(text) = block {
+            text_parts.push(text.text.clone());
+        }
+    }
+    let text = text_parts.join("\n");
+    if text.is_empty() {
+        return if result.is_error { "[error]".to_string() } else { "[done]".to_string() };
+    }
+    // Truncate if too long
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() > 10 || text.len() > max_len {
+        let preview_lines: Vec<&str> = lines.into_iter().take(5).collect();
+        let preview = preview_lines.join("\n");
+        if preview.len() > max_len {
+            format!("{}...", &preview[..max_len])
+        } else {
+            format!("{}...\n[truncated]", preview)
+        }
+    } else {
+        text
+    }
+}
+
+/// Emit tool execution start indicator to stderr.
+fn emit_tool_start(tool_name: &str, args: &serde_json::Value) {
+    let args_display = format_tool_args(args, 60);
+    eprintln!("● {}({})", tool_name, args_display);
+}
+
+/// Emit tool execution end indicator to stderr.
+fn emit_tool_end(_tool_name: &str, result: &pi::tools::ToolOutput, is_error: bool) {
+    let result_display = format_tool_result(result, 200);
+    let prefix = if is_error { "⎿ [error] " } else { "⎿ " };
+    for line in result_display.lines() {
+        eprintln!("{}{}", prefix, line);
+    }
 }
 
 fn emit_trailing_print_newline(state: PrintTextStreamState) -> io::Result<()> {

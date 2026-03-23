@@ -70,6 +70,7 @@ fn known_long_option(name: &str) -> Option<LongOptionSpec> {
         | "session-dir"
         | "session-durability"
         | "mode"
+        | "max-tool-iterations"
         | "tools"
         | "extension"
         | "extension-policy"
@@ -363,6 +364,10 @@ pub struct Cli {
     /// Disable all built-in tools
     #[arg(long)]
     pub no_tools: bool,
+
+    /// Maximum tool call iterations (default: 50, use 1 for single-shot in print mode)
+    #[arg(long)]
+    pub max_tool_iterations: Option<usize>,
 
     /// Specific tools to enable (comma-separated: read,bash,edit,write,grep,find,ls,hashline_edit)
     #[arg(
